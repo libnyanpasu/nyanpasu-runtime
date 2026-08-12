@@ -83,7 +83,7 @@ impl std::str::FromStr for OperationId {
             return Err(ParseOperationIdError);
         }
         let mut bytes = [0u8; 16];
-        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let chunk = std::str::from_utf8(chunk).map_err(|_| ParseOperationIdError)?;
             bytes[index] = u8::from_str_radix(chunk, 16).map_err(|_| ParseOperationIdError)?;
         }
