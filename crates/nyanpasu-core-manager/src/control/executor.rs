@@ -121,9 +121,17 @@ impl Registry {
             .get(&id)
             .map(|operation| operation.state_tx.borrow().clone())
     }
+
+    pub(super) fn subscribe(&self, id: OperationId) -> Option<watch::Receiver<OperationState>> {
+        let inner = self.inner.lock();
+        inner
+            .operations
+            .get(&id)
+            .map(|operation| operation.state_tx.subscribe())
+    }
 }
 
-fn is_terminal(state: &OperationState) -> bool {
+pub(super) fn is_terminal(state: &OperationState) -> bool {
     matches!(
         state,
         OperationState::Succeeded(_) | OperationState::Failed(_)

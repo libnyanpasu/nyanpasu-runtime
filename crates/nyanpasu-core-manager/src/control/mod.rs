@@ -453,6 +453,27 @@ impl CoreControl {
         self.registry.get(id)
     }
 
+    /// Long-poll surface for RPC hosts: the operation's state after `timeout`,
+    /// or its terminal state the moment it reaches one — whichever comes
+    /// first. `None` for an unknown or evicted id.
+    pub async fn wait_operation(
+        &self,
+        id: OperationId,
+        timeout: std::time::Duration,
+    ) -> Option<OperationState> {
+        let mut state_rx = self.registry.subscribe(id)?;
+        let _ = tokio::time::timeout(timeout, async {
+            while !executor::is_terminal(&state_rx.borrow_and_update()) {
+                if state_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        let state = state_rx.borrow().clone();
+        Some(state)
+    }
+
     /// Advisory, read-only config validation (amendment A2): bounded
     /// concurrency, never queued, and never a precondition for any change.
     pub async fn check(&self, request: CheckRequest) -> Result<(), CoreError> {
