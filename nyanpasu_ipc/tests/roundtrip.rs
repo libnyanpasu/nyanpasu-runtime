@@ -39,7 +39,7 @@ use interprocess::local_socket::{
 };
 use nyanpasu_ipc::{
     api::{
-        RBuilder, ResponseCode,
+        CoreErrorKind, RBuilder, ResponseCode,
         core::{
             apply::{
                 ApplyOutcomeKind, CORE_APPLY_ENDPOINT, CoreApplyData, CoreApplyReq, CoreApplyRes,
@@ -48,7 +48,6 @@ use nyanpasu_ipc::{
             start::{CORE_START_ENDPOINT, CoreStartReq, CoreStartRes},
             stop::{CORE_STOP_ENDPOINT, CoreStopRes},
         },
-        error_kind,
         log::{LOGS_INSPECT_ENDPOINT, LOGS_RETRIEVE_ENDPOINT, LogsRes, LogsResBody},
         network::set_dns::{NETWORK_SET_DNS_ENDPOINT, NetworkSetDnsReq, NetworkSetDnsRes},
         status::{
@@ -401,7 +400,7 @@ async fn apply_config_conflict_handler() -> (StatusCode, Json<CoreApplyRes<'stat
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(RBuilder::other_error_with_kind(
             Cow::Borrowed("config revision conflict"),
-            Some(Cow::Borrowed(error_kind::REVISION_CONFLICT)),
+            Some(CoreErrorKind::RevisionConflict),
         )),
     )
 }
@@ -762,13 +761,18 @@ async fn a_server_error_kind_reaches_the_client() {
         return;
     };
 
-    match client.apply_config(&apply_payload()).await {
-        Err(ClientError::Server {
+    let error = client.apply_config(&apply_payload()).await.unwrap_err();
+    assert_eq!(
+        error.core_error_kind(),
+        Some(CoreErrorKind::RevisionConflict)
+    );
+    match error {
+        ClientError::Server {
             code,
             msg,
             error_kind,
             ..
-        }) => {
+        } => {
             assert_eq!(code, ResponseCode::OtherError);
             assert_eq!(msg, "config revision conflict");
             assert_eq!(error_kind.as_deref(), Some("revision_conflict"));

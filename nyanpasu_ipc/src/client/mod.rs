@@ -5,7 +5,7 @@ use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use crate::{
     SERVICE_PLACEHOLDER,
     api::{
-        R, ResponseCode,
+        CoreErrorKind, R, ResponseCode,
         contract::{IpcOperation, OpResponse},
     },
 };
@@ -49,7 +49,7 @@ pub enum ClientError {
         code: ResponseCode,
         msg: String,
         /// The envelope's `error_kind`, when the service classified the
-        /// failure. See [`crate::api::error_kind`].
+        /// failure. See [`crate::api::CoreErrorKind`].
         error_kind: Option<String>,
     },
     #[error("IPC request `{operation}` succeeded but carried no data")]
@@ -60,6 +60,25 @@ pub enum ClientError {
         #[source]
         source: reqwest_websocket::Error,
     },
+}
+
+impl ClientError {
+    /// The typed classification of a server-side failure, when there is one
+    /// this build knows.
+    ///
+    /// `None` covers three different things and deliberately does not
+    /// distinguish them: a transport failure with no envelope, an envelope the
+    /// service did not classify, and a kind a newer service named that this
+    /// build has no variant for. The raw string is still on
+    /// [`Self::Server::error_kind`] for the last case.
+    pub fn core_error_kind(&self) -> Option<CoreErrorKind> {
+        match self {
+            Self::Server { error_kind, .. } => {
+                error_kind.as_deref().and_then(CoreErrorKind::from_wire)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// An IPC client sharing one underlying HTTP client across all operations.
@@ -188,5 +207,41 @@ impl Client {
             });
         }
         Ok(envelope)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_known_kind_is_typed() {
+        let error = ClientError::Server {
+            operation: "/core/apply",
+            code: ResponseCode::OtherError,
+            msg: "boom".into(),
+            error_kind: Some("revision_conflict".into()),
+        };
+        assert_eq!(
+            error.core_error_kind(),
+            Some(CoreErrorKind::RevisionConflict)
+        );
+    }
+
+    #[test]
+    fn an_unknown_kind_keeps_its_raw_string() {
+        let error = ClientError::Server {
+            operation: "/core/apply",
+            code: ResponseCode::OtherError,
+            msg: "boom".into(),
+            error_kind: Some("a_future_kind".into()),
+        };
+        assert!(error.core_error_kind().is_none());
+        match error {
+            ClientError::Server { error_kind, .. } => {
+                assert_eq!(error_kind.as_deref(), Some("a_future_kind"));
+            }
+            other => panic!("expected a server error, got: {other:?}"),
+        }
     }
 }

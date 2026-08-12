@@ -6,7 +6,7 @@ use std::{
 
 use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
-    ApplyOutcome, ConfigRevision, CoreKind, CoreManager as Manager, CoreSpec,
+    ApplyOutcome, ConfigRevision, CoreErrorKind, CoreKind, CoreManager as Manager, CoreSpec,
     CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, HealthState, HealthStatus,
     Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel, ManagerOptions,
     RevisionId,
@@ -14,7 +14,6 @@ use nyanpasu_core_manager::{
 use nyanpasu_ipc::api::{
     R, RBuilder,
     core::apply::{ApplyOutcomeKind, CoreApplyData},
-    error_kind,
     status::{
         ConfigRevisionInfo, CoreControllerInfo, CoreHealthInfo, CoreHealthState, CoreInfos,
         CoreState, CoreStateDetail, RevisionIdInfo,
@@ -51,7 +50,7 @@ pub(crate) const MSG_CORE_NOT_STARTED: &str = "core have not been started yet";
 /// place it can be derived without downcasting is where the `ManagerError` is
 /// still typed.
 pub(crate) struct OpError {
-    kind: Option<&'static str>,
+    kind: Option<CoreErrorKind>,
     message: String,
 }
 
@@ -67,7 +66,7 @@ impl OpError {
 
     /// A failure the service *can* classify, where the classification is a fact
     /// about the failure and not a guess about its cause.
-    fn with_kind(kind: &'static str, message: impl Into<String>) -> Self {
+    fn with_kind(kind: CoreErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind: Some(kind),
             message: message.into(),
@@ -79,14 +78,14 @@ impl OpError {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug,
     {
-        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind.map(Cow::Borrowed))
+        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind)
     }
 }
 
 impl From<ManagerError> for OpError {
     fn from(error: ManagerError) -> Self {
         Self {
-            kind: map_error_kind(&error),
+            kind: error.kind(),
             message: match &error {
                 // The legacy wire string the GUI already branches on, so
                 // `apply` on a stopped core reads exactly like `restart` on
@@ -401,7 +400,7 @@ impl CoreManagerService {
                 ))
             })?;
         let binary_path = find_binary_path(infos, core_type)
-            .map_err(|error| OpError::with_kind(error_kind::BINARY_NOT_FOUND, error.to_string()))
+            .map_err(|error| OpError::with_kind(CoreErrorKind::BinaryNotFound, error.to_string()))
             .and_then(|path| {
                 Utf8PathBuf::from_path_buf(path).map_err(|path| {
                     OpError::plain(format!("core binary path is not UTF-8: {}", path.display()))
@@ -638,32 +637,6 @@ fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
     }
 }
 
-/// The wire classification for a manager error, or `None` when this change does
-/// not classify it yet (report P3 maps the rest).
-///
-/// `Error` is `#[non_exhaustive]`, so the wildcard arm is mandatory; it must
-/// stay "no kind", never a guess.
-fn map_error_kind(error: &ManagerError) -> Option<&'static str> {
-    match error {
-        ManagerError::NotStarted => Some(error_kind::NOT_STARTED),
-        ManagerError::AlreadyRunning => Some(error_kind::ALREADY_RUNNING),
-        ManagerError::RevisionConflict { .. } => Some(error_kind::REVISION_CONFLICT),
-        ManagerError::ManagerQuarantined { .. } => Some(error_kind::QUARANTINED),
-        ManagerError::ConfigCheckFailed(_) => Some(error_kind::CONFIG_CHECK_FAILED),
-        ManagerError::ConfigNotFound(_) => Some(error_kind::CONFIG_NOT_FOUND),
-        ManagerError::BinaryNotFound(_) => Some(error_kind::BINARY_NOT_FOUND),
-        ManagerError::InvalidConfig(_) | ManagerError::Yaml(_) => Some(error_kind::INVALID_CONFIG),
-        ManagerError::ControllerMissing => Some(error_kind::CONTROLLER_MISSING),
-        ManagerError::ApplyFailed(_) => Some(error_kind::APPLY_FAILED),
-        ManagerError::ApplyRollbackFailed { .. } => Some(error_kind::APPLY_ROLLBACK_FAILED),
-        ManagerError::StopUnconfirmed(_) => Some(error_kind::STOP_UNCONFIRMED),
-        // The durability wrapper is a warning around a real failure; report the
-        // failure's kind so a caller can still branch on it.
-        ManagerError::DurabilityUncertain { source, .. } => map_error_kind(source),
-        _ => None,
-    }
-}
-
 /// The lossless counterpart to `map_core_state`.
 fn map_state_detail(state: &ManagerCoreState) -> Option<CoreStateDetail> {
     match state {
@@ -788,7 +761,7 @@ async fn canonical_config_path(config_file: &Path) -> Result<Utf8PathBuf, OpErro
             );
             match error.kind() {
                 std::io::ErrorKind::NotFound => {
-                    OpError::with_kind(error_kind::CONFIG_NOT_FOUND, message)
+                    OpError::with_kind(CoreErrorKind::ConfigNotFound, message)
                 }
                 _ => OpError::plain(message),
             }
@@ -1234,62 +1207,13 @@ mod tests {
         assert_eq!(data.failed_apply.as_deref(), Some("boom"));
     }
 
-    #[test]
-    fn manager_errors_map_onto_the_wire_error_kinds() {
-        let cases: [(ManagerError, Option<&str>); 8] = [
-            (ManagerError::NotStarted, Some("not_started")),
-            (ManagerError::AlreadyRunning, Some("already_running")),
-            (
-                ManagerError::RevisionConflict {
-                    expected: RevisionId {
-                        epoch: 3,
-                        generation: 7,
-                        effective_hash: "fedcba9876543210".to_owned(),
-                    },
-                    actual: None,
-                },
-                Some("revision_conflict"),
-            ),
-            (
-                ManagerError::ManagerQuarantined {
-                    epoch: 3,
-                    reason: "death unconfirmed".to_owned(),
-                },
-                Some("quarantined"),
-            ),
-            (
-                ManagerError::ConfigCheckFailed("unknown field".to_owned()),
-                Some("config_check_failed"),
-            ),
-            (ManagerError::ControllerMissing, Some("controller_missing")),
-            // The durability wrapper reports the wrapped failure's kind.
-            (
-                ManagerError::DurabilityUncertain {
-                    source: Box::new(ManagerError::ApplyFailed("boom".to_owned())),
-                    warning: "sync failed".to_owned(),
-                },
-                Some("apply_failed"),
-            ),
-            // Unmapped until report P3: no kind rather than a guessed one.
-            (
-                ManagerError::StartupFailed {
-                    stderr_tail: String::new(),
-                },
-                None,
-            ),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(map_error_kind(&error), expected, "{error}");
-        }
-    }
-
     /// `apply` on a stopped core answers with the same string `restart` does,
     /// so a GUI branching on it keeps working, and gains the kind beside it.
     #[test]
     fn the_not_started_failure_keeps_the_legacy_wire_string() {
         let error = OpError::from(ManagerError::NotStarted);
         assert_eq!(error.message, MSG_CORE_NOT_STARTED);
-        assert_eq!(error.kind, Some("not_started"));
+        assert_eq!(error.kind, Some(CoreErrorKind::NotStarted));
     }
 
     #[test]
@@ -1516,7 +1440,7 @@ mod tests {
             .check(&infos, &mihomo(), &missing)
             .await
             .expect_err("the path does not exist");
-        assert_eq!(resolved.kind, Some(error_kind::CONFIG_NOT_FOUND));
+        assert_eq!(resolved.kind, Some(CoreErrorKind::ConfigNotFound));
         assert!(
             resolved.message.contains("nope.yaml"),
             "the failure must name the path: {}",
@@ -1539,7 +1463,7 @@ mod tests {
             .check(&infos, &mihomo(), &config)
             .await
             .expect_err("no binary exists under either dir");
-        assert_eq!(error.kind, Some(error_kind::BINARY_NOT_FOUND));
+        assert_eq!(error.kind, Some(CoreErrorKind::BinaryNotFound));
         assert!(
             error.message.contains(mihomo().get_executable_name()),
             "the failure must name the binary: {}",

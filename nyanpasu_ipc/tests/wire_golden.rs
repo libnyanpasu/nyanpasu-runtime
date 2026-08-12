@@ -13,13 +13,12 @@ use std::{
 };
 
 use nyanpasu_ipc::api::{
-    R, RBuilder, ResponseCode,
+    CoreErrorKind, R, RBuilder, ResponseCode,
     core::{
         apply::{ApplyOutcomeKind, CoreApplyData, CoreApplyReq},
         check::CoreCheckReq,
         start::CoreStartReq,
     },
-    error_kind,
     log::LogsResBody,
     network::set_dns::NetworkSetDnsReq,
     status::{
@@ -53,12 +52,12 @@ where
     envelope
 }
 
-fn error_envelope_with_kind<T>(msg: &'static str, kind: &'static str) -> R<'static, T>
+fn error_envelope_with_kind<T>(msg: &'static str, kind: CoreErrorKind) -> R<'static, T>
 where
     T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
     let mut envelope: R<'static, T> =
-        RBuilder::other_error_with_kind(Cow::Borrowed(msg), Some(Cow::Borrowed(kind)));
+        RBuilder::other_error_with_kind(Cow::Borrowed(msg), Some(kind));
     envelope.ts = TS;
     envelope
 }
@@ -702,19 +701,29 @@ fn the_apply_outcome_kinds_are_pinned() {
 
 #[test]
 fn the_error_kind_strings_are_pinned() {
-    // These are protocol: a caller branches on them.
-    assert_eq!(error_kind::NOT_STARTED, "not_started");
-    assert_eq!(error_kind::ALREADY_RUNNING, "already_running");
-    assert_eq!(error_kind::REVISION_CONFLICT, "revision_conflict");
-    assert_eq!(error_kind::QUARANTINED, "quarantined");
-    assert_eq!(error_kind::CONFIG_CHECK_FAILED, "config_check_failed");
-    assert_eq!(error_kind::CONFIG_NOT_FOUND, "config_not_found");
-    assert_eq!(error_kind::BINARY_NOT_FOUND, "binary_not_found");
-    assert_eq!(error_kind::INVALID_CONFIG, "invalid_config");
-    assert_eq!(error_kind::CONTROLLER_MISSING, "controller_missing");
-    assert_eq!(error_kind::APPLY_FAILED, "apply_failed");
-    assert_eq!(error_kind::APPLY_ROLLBACK_FAILED, "apply_rollback_failed");
-    assert_eq!(error_kind::STOP_UNCONFIRMED, "stop_unconfirmed");
+    // These are protocol: a caller branches on them. The enum lives in
+    // nyanpasu-core-metadata now, so this pins what actually reaches the wire.
+    for (kind, expected) in [
+        (CoreErrorKind::NotStarted, r#""not_started""#),
+        (CoreErrorKind::AlreadyRunning, r#""already_running""#),
+        (CoreErrorKind::RevisionConflict, r#""revision_conflict""#),
+        (CoreErrorKind::Quarantined, r#""quarantined""#),
+        (CoreErrorKind::ConfigCheckFailed, r#""config_check_failed""#),
+        (CoreErrorKind::ConfigNotFound, r#""config_not_found""#),
+        (CoreErrorKind::BinaryNotFound, r#""binary_not_found""#),
+        (CoreErrorKind::InvalidConfig, r#""invalid_config""#),
+        (CoreErrorKind::ControllerMissing, r#""controller_missing""#),
+        (CoreErrorKind::ApplyFailed, r#""apply_failed""#),
+        (
+            CoreErrorKind::ApplyRollbackFailed,
+            r#""apply_rollback_failed""#,
+        ),
+        (CoreErrorKind::StopUnconfirmed, r#""stop_unconfirmed""#),
+    ] {
+        assert_eq!(serde_json::to_string(&kind).unwrap(), expected);
+    }
+    // Every kind is covered above; a new one must be added here too.
+    assert_eq!(CoreErrorKind::ALL.len(), 12);
 }
 
 /// The new field is appended, so no existing key moves; the absent case is
@@ -722,7 +731,7 @@ fn the_error_kind_strings_are_pinned() {
 #[test]
 fn an_error_envelope_carries_its_kind() {
     let envelope: R<'static, ()> =
-        error_envelope_with_kind("config revision conflict", error_kind::REVISION_CONFLICT);
+        error_envelope_with_kind("config revision conflict", CoreErrorKind::RevisionConflict);
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
         concat!(
