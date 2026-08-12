@@ -13,6 +13,7 @@ pub mod kind;
 mod log;
 mod log_sink;
 pub mod manager;
+pub mod runtime;
 pub mod spec;
 pub mod state;
 
@@ -33,6 +34,7 @@ pub use probe::{
     ControllerVersionProbe, HealthProbe, ProbeContext, ProbeFuture, ProbeHandle, ProbePhase,
     ProbeResult,
 };
+pub use runtime::{RuntimeBackend, RuntimeInstance, RuntimeLaunchRequest};
 pub use runtime_store::{
     RuntimeCommitDurability, RuntimeConfigBackup, RuntimeConfigCommit, RuntimeConfigStore,
     StagedRuntimeConfig,

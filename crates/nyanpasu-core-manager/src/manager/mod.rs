@@ -20,10 +20,13 @@ use crate::{
     capability::{ResolvedFeatures, VersionCache},
     config::{self, ConfigSnapshot, mihomo},
     error::Error,
-    instance::Instance,
     log::{LOG_CHANNEL_CAPACITY, LogFrame},
     log_sink::{self, SinkOptions},
     probe::ProbeHandle,
+    runtime::{
+        RuntimeBackend, RuntimeInstance, RuntimeLaunchRequest,
+        process::{ProbePlan, ProcessRuntimeBackend},
+    },
     runtime_store::{RuntimeConfigStore, RuntimeDirectoryLock, StagedRuntimeConfig},
     spec::{CoreSpec, InstanceSpec, LocalIpcPolicy, ManagerOptions, ResolvedController},
     state::{ConfigRevision, CoreState, CoreStatus, InstanceStatus, StopReason},
@@ -91,18 +94,12 @@ pub struct CoreManager {
 pub struct CoreManagerBuilder {
     options: ManagerOptions,
     probes: ProbePlan,
-}
-
-#[derive(Clone, Default)]
-struct ProbePlan {
-    readiness: Option<ProbeHandle>,
-    liveness: Option<ProbeHandle>,
-    liveness_with_readiness: bool,
+    backend: Option<Arc<dyn RuntimeBackend>>,
 }
 
 struct Inner {
     options: ManagerOptions,
-    probes: ProbePlan,
+    backend: Arc<dyn RuntimeBackend>,
     store: RuntimeConfigStore,
     ctrl: tokio::sync::Mutex<Ctrl>,
     status_tx: watch::Sender<CoreStatus>,
@@ -139,7 +136,7 @@ struct QuarantinedEpoch {
 }
 
 struct Active {
-    instance: Instance,
+    instance: Box<dyn RuntimeInstance>,
     forwarder: tokio::task::JoinHandle<()>,
     source_spec: InstanceSpec,
     revision: ConfigRevision,
@@ -196,6 +193,14 @@ impl CoreManagerBuilder {
         self
     }
 
+    /// Replaces the default process backend. The probe methods on this builder
+    /// configure the default backend only; a custom backend owns its own
+    /// probing.
+    pub fn runtime_backend(mut self, backend: Arc<dyn RuntimeBackend>) -> Self {
+        self.backend = Some(backend);
+        self
+    }
+
     pub async fn build(self) -> Result<CoreManager, Error> {
         CoreManager::build_configured(self).await
     }
@@ -206,6 +211,7 @@ impl CoreManager {
         CoreManagerBuilder {
             options,
             probes: ProbePlan::default(),
+            backend: None,
         }
     }
 
@@ -214,7 +220,11 @@ impl CoreManager {
     }
 
     async fn build_configured(builder: CoreManagerBuilder) -> Result<Self, Error> {
-        let CoreManagerBuilder { options, probes } = builder;
+        let CoreManagerBuilder {
+            options,
+            probes,
+            backend,
+        } = builder;
         let runtime_dir = options
             .runtime_dir
             .clone()
@@ -272,10 +282,16 @@ impl CoreManager {
         } else {
             (None, None)
         };
+        let backend = backend.unwrap_or_else(|| {
+            Arc::new(ProcessRuntimeBackend::new(
+                probes,
+                options.cancel_token.clone(),
+            ))
+        });
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
-                probes,
+                backend,
                 store,
                 ctrl: tokio::sync::Mutex::default(),
                 status_tx,
@@ -409,7 +425,7 @@ impl CoreManager {
 
         let pid = instance.pid().unwrap_or_default();
         self.inner.publish_instance(
-            &instance,
+            instance.as_ref(),
             CoreState::Running { epoch, pid },
             &prepared.source_spec,
             &prepared.revision,
@@ -507,7 +523,7 @@ impl CoreManager {
     }
 
     pub async fn check_config(&self, spec: &InstanceSpec) -> Result<(), Error> {
-        crate::kind::check_config(spec).await
+        self.inner.backend.check_config(spec).await
     }
 
     async fn resolve_features(&self, core: &CoreSpec) -> Result<ResolvedFeatures, Error> {
@@ -603,24 +619,16 @@ impl CoreManager {
         effective_spec: InstanceSpec,
         epoch: u64,
         controller: ResolvedController,
-    ) -> Result<Instance, Error> {
-        let mut builder = Instance::builder(
-            effective_spec,
-            epoch,
-            controller,
-            self.inner.options.cancel_token.clone(),
-        )
-        .log_sender(self.inner.log_tx.clone());
-        if let Some(probe) = self.inner.probes.readiness.clone() {
-            builder = builder.readiness_probe(probe);
-        }
-        if let Some(probe) = self.inner.probes.liveness.clone() {
-            builder = builder.liveness_probe(probe);
-        }
-        if self.inner.probes.liveness_with_readiness {
-            builder = builder.liveness_with_readiness_probe();
-        }
-        builder.spawn().await
+    ) -> Result<Box<dyn RuntimeInstance>, Error> {
+        self.inner
+            .backend
+            .launch(RuntimeLaunchRequest {
+                effective_spec,
+                epoch,
+                controller,
+                log_tx: self.inner.log_tx.clone(),
+            })
+            .await
     }
 }
 

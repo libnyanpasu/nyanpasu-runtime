@@ -4,8 +4,8 @@ use crate::{
         mihomo::{self, ConfigChange},
     },
     error::Error,
-    instance::Instance,
     probe::ProbePhase,
+    runtime::RuntimeInstance,
     spec::InstanceSpec,
     state::{ConfigRevision, CoreState, RevisionId},
 };
@@ -171,7 +171,7 @@ impl CoreManager {
         let staged = self.inner.store.stage(epoch, &prepared.bytes).await?;
         let mut check_spec = input.clone();
         check_spec.config_path = staged.path().to_owned();
-        crate::kind::check_config(&check_spec).await?;
+        self.inner.backend.check_config(&check_spec).await?;
 
         let runtime_path = current.revision.runtime_path.clone();
         let mut effective_spec = input.clone();
@@ -204,7 +204,7 @@ impl CoreManager {
     ) -> bool {
         if let ConfigChange::Patch { patch, projection } = change {
             return self
-                .patch_and_verify(&current.instance, patch, projection)
+                .patch_and_verify(current.instance.as_ref(), patch, projection)
                 .await;
         }
         if matches!(change, ConfigChange::Switch) {
@@ -249,7 +249,7 @@ impl CoreManager {
 
     pub(super) async fn patch_and_verify(
         &self,
-        instance: &Instance,
+        instance: &dyn RuntimeInstance,
         patch: &clash_api::ConfigPatch,
         projection: &mihomo::RuntimeProjection,
     ) -> bool {
