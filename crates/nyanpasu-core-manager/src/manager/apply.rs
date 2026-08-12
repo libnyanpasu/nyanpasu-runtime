@@ -23,6 +23,17 @@ impl CoreManager {
     ) -> Result<ApplyOutcome, Error> {
         let mut ctrl = self.inner.ctrl.lock().await;
         reject_quarantine(&ctrl)?;
+        self.apply_locked(&mut ctrl, input, expected_revision).await
+    }
+
+    /// The running-core apply transaction, entered with the control lock held.
+    /// Shared by [`Self::apply_config`] and [`CoreManager::reconcile`].
+    pub(super) async fn apply_locked(
+        &self,
+        ctrl: &mut Ctrl,
+        input: InstanceSpec,
+        expected_revision: Option<RevisionId>,
+    ) -> Result<ApplyOutcome, Error> {
         let current = ctrl.current.as_ref().ok_or(Error::NotStarted)?;
         if current.instance.state().borrow().state.is_terminal() {
             return Err(Error::NotStarted);
@@ -56,9 +67,7 @@ impl CoreManager {
         }
         if matches!(change, ConfigChange::Switch) {
             drop(prepared);
-            return self
-                .switch_with_compensation(&mut ctrl, input, snapshot)
-                .await;
+            return self.switch_with_compensation(ctrl, input, snapshot).await;
         }
 
         let backup = self
@@ -142,9 +151,7 @@ impl CoreManager {
             return Ok(with_durability_warning(outcome, durability_warning));
         }
 
-        let result = self
-            .restart_with_compensation(&mut ctrl, desired, backup)
-            .await;
+        let result = self.restart_with_compensation(ctrl, desired, backup).await;
         with_durability_result(result, durability_warning)
     }
 

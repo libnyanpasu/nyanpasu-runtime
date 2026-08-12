@@ -4,6 +4,7 @@
 mod apply;
 mod publish;
 mod quarantine;
+mod reconcile;
 mod switching;
 
 use std::sync::{
@@ -59,6 +60,12 @@ pub enum SwitchOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
+    /// Nothing was running; the desired runtime was started cold. Only
+    /// [`CoreManager::reconcile`] produces this — the legacy `apply_config`
+    /// path requires a running core.
+    Started {
+        revision: ConfigRevision,
+    },
     Noop {
         revision: ConfigRevision,
     },

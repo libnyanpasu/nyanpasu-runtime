@@ -628,6 +628,11 @@ fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
         ApplyOutcome::DurabilityUncertain { .. } => {
             unreachable!("unwrapped by the loop above")
         }
+        // The v1 apply handler feeds this from `apply_config`, which requires
+        // a running core; only the v2 `reconcile` path can cold-start.
+        ApplyOutcome::Started { .. } => {
+            unreachable!("apply_config never cold-starts a core")
+        }
     };
     CoreApplyData {
         outcome: kind,
