@@ -719,11 +719,20 @@ fn the_error_kind_strings_are_pinned() {
             r#""apply_rollback_failed""#,
         ),
         (CoreErrorKind::StopUnconfirmed, r#""stop_unconfirmed""#),
+        // The control-plane admission and routing kinds (PR-A).
+        (CoreErrorKind::ShuttingDown, r#""shutting_down""#),
+        (CoreErrorKind::QueueFull, r#""queue_full""#),
+        (CoreErrorKind::OperationConflict, r#""operation_conflict""#),
+        (
+            CoreErrorKind::BackendUnavailable,
+            r#""backend_unavailable""#,
+        ),
+        (CoreErrorKind::Internal, r#""internal""#),
     ] {
         assert_eq!(serde_json::to_string(&kind).unwrap(), expected);
     }
     // Every kind is covered above; a new one must be added here too.
-    assert_eq!(CoreErrorKind::ALL.len(), 12);
+    assert_eq!(CoreErrorKind::ALL.len(), 17);
 }
 
 /// The new field is appended, so no existing key moves; the absent case is
