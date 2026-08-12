@@ -36,12 +36,27 @@ impl CoreManager {
     ) -> Result<ApplyOutcome, Error> {
         let mut ctrl = self.inner.ctrl.lock().await;
         reject_quarantine(&ctrl)?;
+        let result = self
+            .reconcile_locked(&mut ctrl, spec, expected_applied)
+            .await;
+        // DNS rides the same transaction (fixed converge tail): applied while
+        // the desired runtime is up, restored when nothing survived.
+        self.dns_converge(&mut ctrl).await;
+        result
+    }
+
+    async fn reconcile_locked(
+        &self,
+        ctrl: &mut super::Ctrl,
+        spec: InstanceSpec,
+        expected_applied: Option<RevisionId>,
+    ) -> Result<ApplyOutcome, Error> {
         let running = ctrl
             .current
             .as_ref()
             .is_some_and(|active| !active.instance.state().borrow().state.is_terminal());
         if running {
-            return self.apply_locked(&mut ctrl, spec, expected_applied).await;
+            return self.apply_locked(ctrl, spec, expected_applied).await;
         }
 
         // Nothing is effectively applied — a crashed epoch's revision is not
@@ -64,13 +79,13 @@ impl CoreManager {
                 .await
             {
                 if matches!(error, Error::StopUnconfirmed(_)) {
-                    return Err(self.latch_quarantine(&mut ctrl, epoch, error));
+                    return Err(self.latch_quarantine(ctrl, epoch, error));
                 }
                 return Err(error);
             }
             self.inner.store.cleanup_epoch(epoch).await?;
         }
-        self.start_locked(&mut ctrl, spec).await?;
+        self.start_locked(ctrl, spec).await?;
         let revision = ctrl
             .current
             .as_ref()

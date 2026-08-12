@@ -2,6 +2,7 @@
 //! atomic status publication.
 
 mod apply;
+mod dns_sync;
 mod publish;
 mod quarantine;
 mod reconcile;
@@ -20,6 +21,7 @@ use crate::{
     Feature, RuntimeFeature,
     capability::{ResolvedFeatures, VersionCache},
     config::{self, ConfigSnapshot, mihomo},
+    dns::{DnsController, DnsOverrideRecord},
     error::Error,
     log::{LOG_CHANNEL_CAPACITY, LogFrame},
     log_sink::{self, SinkOptions},
@@ -104,11 +106,13 @@ pub struct CoreManagerBuilder {
     options: ManagerOptions,
     probes: ProbePlan,
     backend: Option<Arc<dyn RuntimeBackend>>,
+    dns: Option<Arc<dyn DnsController>>,
 }
 
 struct Inner {
     options: ManagerOptions,
     backend: Arc<dyn RuntimeBackend>,
+    dns: Option<Arc<dyn DnsController>>,
     store: RuntimeConfigStore,
     ctrl: tokio::sync::Mutex<Ctrl>,
     status_tx: watch::Sender<CoreStatus>,
@@ -135,6 +139,9 @@ struct Ctrl {
     current: Option<Active>,
     last_spec: Option<InstanceSpec>,
     quarantine: Vec<QuarantinedEpoch>,
+    /// The persisted-and-live DNS override, when a controller is injected and
+    /// an override is in place. Serialized by the control lock like the rest.
+    dns_record: Option<DnsOverrideRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -210,6 +217,13 @@ impl CoreManagerBuilder {
         self
     }
 
+    /// Injects the host DNS override component (amendment A5 ③). Without one
+    /// the manager has zero DNS behavior.
+    pub fn dns_controller(mut self, dns: Arc<dyn DnsController>) -> Self {
+        self.dns = Some(dns);
+        self
+    }
+
     pub async fn build(self) -> Result<CoreManager, Error> {
         CoreManager::build_configured(self).await
     }
@@ -221,6 +235,7 @@ impl CoreManager {
             options,
             probes: ProbePlan::default(),
             backend: None,
+            dns: None,
         }
     }
 
@@ -233,6 +248,7 @@ impl CoreManager {
             options,
             probes,
             backend,
+            dns,
         } = builder;
         let runtime_dir = options
             .runtime_dir
@@ -271,6 +287,7 @@ impl CoreManager {
             ));
         }
         let max_epoch = sweep_orphans(&store).await?;
+        dns_sync::reconcile_orphan_record(&store, dns.as_deref()).await;
         let (status_tx, _) = watch::channel(CoreStatus::initial());
         let (log_tx, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
         // Subscribed here rather than inside the task, and before any instance
@@ -301,6 +318,7 @@ impl CoreManager {
             inner: Arc::new(Inner {
                 options,
                 backend,
+                dns,
                 store,
                 ctrl: tokio::sync::Mutex::default(),
                 status_tx,
@@ -462,6 +480,9 @@ impl CoreManager {
     /// the number of possibly live processes; it does not clear quarantine.
     pub async fn stop(&self) -> Result<(), Error> {
         let mut ctrl = self.inner.ctrl.lock().await;
+        // Restore at the head of the stop transaction: resolution must never
+        // point at a core that is being torn down.
+        self.dns_restore(&mut ctrl).await;
         let Some(active) = ctrl.current.take() else {
             return Err(Error::NotStarted);
         };
@@ -567,6 +588,8 @@ impl CoreManager {
         // Held through sink finalization so no control-plane operation can interleave
         // between core stop and archive teardown.
         let mut ctrl = self.inner.ctrl.lock().await;
+        // Same head restore as `stop`.
+        self.dns_restore(&mut ctrl).await;
         let result: Result<(), Error> = async {
             if let Some(active) = ctrl.current.take() {
                 let Active {
