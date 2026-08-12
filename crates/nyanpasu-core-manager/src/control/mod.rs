@@ -12,14 +12,25 @@
 //!   kind is a statement of fact about the failure and a guessed kind is worse
 //!   than an absent one; unclassified failures stay unclassified.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+mod executor;
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU32, Ordering},
+};
+
+use camino::Utf8PathBuf;
+use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 
 use crate::{
     error::CoreErrorKind,
-    manager::ApplyOutcome,
-    spec::{CoreSpec, InstanceOptions},
-    state::RevisionId,
+    log::LogFrame,
+    manager::{ApplyOutcome, CoreManager},
+    spec::{CoreSpec, InstanceOptions, InstanceSpec},
+    state::{CoreStatus, RevisionId},
 };
+
+use executor::{Admission, ExecutorContext, ExecutorWork, Registry};
 
 /// Correlation, idempotency, and event-tracing identity of one control
 /// request. Not a lease, a session, or a lock: it never grants ownership and
@@ -157,6 +168,41 @@ pub enum CoreCommand {
     Shutdown,
 }
 
+impl CoreCommand {
+    /// The identity digest the idempotency registry compares: two envelopes
+    /// with the same [`OperationId`] must describe the same work. Config
+    /// bytes, the desired core, and the CAS token are identity; tuning fields
+    /// ([`InstanceOptions`]) deliberately are not.
+    pub fn payload_digest(&self) -> String {
+        use std::fmt::Write;
+        match self {
+            Self::Reconcile(request) => {
+                let mut identity = format!(
+                    "reconcile\0{}\0{}\0{}\0",
+                    request.core.kind,
+                    request.core.binary_path,
+                    request.core.version.as_deref().unwrap_or(""),
+                );
+                for feature in &request.core.features {
+                    identity.push_str(feature);
+                    identity.push('\0');
+                }
+                if let Some(expected) = &request.expected_applied {
+                    let _ = write!(identity, "{expected}");
+                }
+                identity.push('\0');
+                let mut payload = identity.into_bytes();
+                let ConfigInput::Inline { bytes, .. } = &request.config;
+                payload.extend_from_slice(bytes);
+                payload_digest(&payload)
+            }
+            Self::Stop => payload_digest(b"stop"),
+            Self::Recover => payload_digest(b"recover"),
+            Self::Shutdown => payload_digest(b"shutdown"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CoreCommandEnvelope {
     pub operation_id: OperationId,
@@ -243,6 +289,250 @@ pub enum OperationState {
     Running,
     Succeeded(OperationOutput),
     Failed(CoreError),
+}
+
+/// Host-boundary configuration of one control plane.
+#[derive(Debug, Clone)]
+pub struct ControlOptions {
+    /// Where portable config bytes are materialized for the path-based
+    /// pipeline underneath. Host-owned; never a caller path.
+    pub source_dir: Utf8PathBuf,
+    /// Working directory for launched cores (data dir with geo assets).
+    pub working_dir: Utf8PathBuf,
+    /// Mutating-operation queue bound; a full queue answers `QueueFull`.
+    pub queue_capacity: usize,
+    /// Most-recent-operations registry bound (idempotency + query window).
+    pub registry_capacity: usize,
+    /// Concurrent advisory checks; further callers wait on the semaphore.
+    pub check_concurrency: usize,
+}
+
+impl ControlOptions {
+    pub fn new(source_dir: Utf8PathBuf, working_dir: Utf8PathBuf) -> Self {
+        Self {
+            source_dir,
+            working_dir,
+            queue_capacity: 16,
+            registry_capacity: 64,
+            check_concurrency: 2,
+        }
+    }
+}
+
+/// How the executor task ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorExit {
+    /// A `Shutdown` operation completed and the executor drained.
+    Clean,
+    /// The task died without shutting down (panic). The host must treat the
+    /// whole control plane as fatally broken.
+    Died,
+}
+
+/// The portable control plane over one [`CoreManager`] (design §9): submit /
+/// status / subscribe on the outside, one executor task owning every mutating
+/// transaction on the inside. Cheap to clone; all clones share the executor.
+#[derive(Clone)]
+pub struct CoreControl {
+    manager: CoreManager,
+    registry: Arc<Registry>,
+    work_tx: mpsc::Sender<ExecutorWork>,
+    closing: Arc<AtomicBool>,
+    check_semaphore: Arc<Semaphore>,
+    source_dir: Utf8PathBuf,
+    working_dir: Utf8PathBuf,
+    done_rx: watch::Receiver<bool>,
+}
+
+impl CoreControl {
+    /// Wraps a host-built manager and spawns the executor task. The manager
+    /// handle stays usable directly, but every mutating call should go through
+    /// `submit` from here on — the executor owns transaction serialization.
+    pub fn spawn(manager: CoreManager, options: ControlOptions) -> Self {
+        let ControlOptions {
+            source_dir,
+            working_dir,
+            queue_capacity,
+            registry_capacity,
+            check_concurrency,
+        } = options;
+        let registry = Arc::new(Registry::new(registry_capacity));
+        let (work_tx, work_rx) = mpsc::channel(queue_capacity);
+        let (done_tx, done_rx) = watch::channel(false);
+        let context = ExecutorContext {
+            manager: manager.clone(),
+            registry: registry.clone(),
+            source_dir: source_dir.clone(),
+            working_dir: working_dir.clone(),
+        };
+        tokio::spawn(async move {
+            executor::run(work_rx, context).await;
+            let _ = done_tx.send(true);
+        });
+        Self {
+            manager,
+            registry,
+            work_tx,
+            closing: Arc::new(AtomicBool::new(false)),
+            check_semaphore: Arc::new(Semaphore::new(check_concurrency)),
+            source_dir,
+            working_dir,
+            done_rx,
+        }
+    }
+
+    /// Admission is synchronous: closing latch, idempotency, then the bounded
+    /// queue. The returned handle names the operation; dropping it never
+    /// cancels the work.
+    pub fn submit(&self, envelope: CoreCommandEnvelope) -> Result<OperationHandle, CoreError> {
+        let id = envelope.operation_id;
+        if self.closing.load(Ordering::Acquire) {
+            return Err(CoreError::new(
+                CoreErrorKind::ShuttingDown,
+                "the control plane is shutting down",
+                false,
+            )
+            .with_operation(id));
+        }
+        let digest = envelope.command.payload_digest();
+        let state_rx = match self.registry.admit(id, &digest)? {
+            Admission::Existing(state_rx) => state_rx,
+            Admission::Registered(state_rx) => {
+                let is_shutdown = matches!(envelope.command, CoreCommand::Shutdown);
+                match self.work_tx.try_send(ExecutorWork {
+                    id,
+                    command: envelope.command,
+                }) {
+                    Ok(()) => {
+                        if is_shutdown {
+                            self.closing.store(true, Ordering::Release);
+                        }
+                        state_rx
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.registry.remove(id);
+                        return Err(CoreError::new(
+                            CoreErrorKind::QueueFull,
+                            "the operation queue is full",
+                            true,
+                        )
+                        .with_operation(id));
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        self.registry.remove(id);
+                        return Err(CoreError::new(
+                            CoreErrorKind::Internal,
+                            "the control executor is gone",
+                            false,
+                        )
+                        .with_operation(id));
+                    }
+                }
+            }
+        };
+        Ok(OperationHandle { id, state_rx })
+    }
+
+    /// Zero-mailbox snapshot read.
+    pub fn status(&self) -> CoreStatus {
+        self.manager.status()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<CoreStatus> {
+        self.manager.subscribe()
+    }
+
+    pub fn subscribe_logs(&self) -> broadcast::Receiver<Arc<LogFrame>> {
+        self.manager.subscribe_logs()
+    }
+
+    /// The registry's answer for one operation id, or `None` when the entry
+    /// was evicted or never existed. Losing an entry is recoverable by
+    /// design: re-read status, and let the revision CAS block a double apply.
+    pub fn operation(&self, id: OperationId) -> Option<OperationState> {
+        self.registry.get(id)
+    }
+
+    /// Advisory, read-only config validation (amendment A2): bounded
+    /// concurrency, never queued, and never a precondition for any change.
+    pub async fn check(&self, request: CheckRequest) -> Result<(), CoreError> {
+        let _permit = self.check_semaphore.acquire().await.map_err(|_| {
+            CoreError::new(
+                CoreErrorKind::Internal,
+                "the check semaphore is closed",
+                false,
+            )
+        })?;
+        let ConfigInput::Inline { bytes, .. } = &request.config;
+        let file_name = format!("check-source-{}.yaml", payload_digest(bytes));
+        let id = OperationId::generate();
+        let config_path =
+            executor::materialize(&self.source_dir, &file_name, request.config, id).await?;
+        let spec = InstanceSpec {
+            core: request.core,
+            config_path: config_path.clone(),
+            working_dir: self.working_dir.clone(),
+            pid_file: None,
+            options: InstanceOptions::default(),
+        };
+        let result = self.manager.check_config(&spec).await;
+        // Best-effort cleanup; a concurrent same-digest check rewrites the
+        // same bytes, so a failed removal is harmless.
+        let _ = tokio::fs::remove_file(&config_path).await;
+        result.map_err(|error| CoreError::from_domain(&error, None))
+    }
+
+    /// Resolves when the executor task has exited: cleanly after a `Shutdown`
+    /// operation, or [`ExecutorExit::Died`] when it panicked. The host must
+    /// watch this and turn `Died` into a fatal service state.
+    pub async fn until_closed(&self) -> ExecutorExit {
+        let mut done_rx = self.done_rx.clone();
+        loop {
+            if *done_rx.borrow_and_update() {
+                return ExecutorExit::Clean;
+            }
+            if done_rx.changed().await.is_err() {
+                return ExecutorExit::Died;
+            }
+        }
+    }
+}
+
+/// A submitted operation. `wait` consumes the handle and resolves with the
+/// terminal result; `state` polls without consuming. Dropping the handle
+/// leaves the operation running to its safe terminal state.
+#[derive(Debug)]
+pub struct OperationHandle {
+    id: OperationId,
+    state_rx: watch::Receiver<OperationState>,
+}
+
+impl OperationHandle {
+    pub fn id(&self) -> OperationId {
+        self.id
+    }
+
+    pub fn state(&self) -> OperationState {
+        self.state_rx.borrow().clone()
+    }
+
+    pub async fn wait(mut self) -> Result<OperationOutput, CoreError> {
+        loop {
+            match self.state_rx.borrow_and_update().clone() {
+                OperationState::Succeeded(output) => return Ok(output),
+                OperationState::Failed(error) => return Err(error),
+                OperationState::Queued | OperationState::Running => {}
+            }
+            if self.state_rx.changed().await.is_err() {
+                return Err(CoreError::new(
+                    CoreErrorKind::Internal,
+                    "the control executor terminated before the operation completed",
+                    false,
+                )
+                .with_operation(self.id));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

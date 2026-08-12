@@ -94,6 +94,8 @@ pub enum ApplyOutcome {
     },
 }
 
+/// A cheap-to-clone handle; every clone shares the same orchestrator state.
+#[derive(Clone)]
 pub struct CoreManager {
     inner: Arc<Inner>,
 }

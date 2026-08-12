@@ -21,8 +21,9 @@ pub use capability::{Feature, RuntimeFeature};
 pub use clash_api::Host;
 pub use config::runtime_store;
 pub use control::{
-    CheckRequest, ConfigInput, CoreCommand, CoreCommandEnvelope, CoreError, OperationId,
-    OperationOutput, OperationState, ReconcileRequest, payload_digest,
+    CheckRequest, ConfigInput, ControlOptions, CoreCommand, CoreCommandEnvelope, CoreControl,
+    CoreError, ExecutorExit, OperationHandle, OperationId, OperationOutput, OperationState,
+    ReconcileRequest, payload_digest,
 };
 pub use error::{CoreErrorKind, Error};
 pub use health::{HealthPolicy, probe};

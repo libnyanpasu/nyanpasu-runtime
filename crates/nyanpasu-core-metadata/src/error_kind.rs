@@ -47,6 +47,9 @@ pub enum CoreErrorKind {
     /// The control endpoint cannot be reached: transport failure, daemon not
     /// running, or the endpoint is reconnecting. Retryable by definition.
     BackendUnavailable,
+    /// The control plane itself failed — an executor died or a reply channel
+    /// broke. Not retryable; the host must treat this as fatal.
+    Internal,
 }
 
 impl CoreErrorKind {
@@ -70,6 +73,7 @@ impl CoreErrorKind {
         Self::QueueFull,
         Self::OperationConflict,
         Self::BackendUnavailable,
+        Self::Internal,
     ];
 
     /// The wire string. `serde` derives the same spelling from
@@ -93,6 +97,7 @@ impl CoreErrorKind {
             Self::QueueFull => "queue_full",
             Self::OperationConflict => "operation_conflict",
             Self::BackendUnavailable => "backend_unavailable",
+            Self::Internal => "internal",
         }
     }
 
@@ -161,6 +166,7 @@ mod tests {
             CoreErrorKind::BackendUnavailable.as_str(),
             "backend_unavailable"
         );
+        assert_eq!(CoreErrorKind::Internal.as_str(), "internal");
     }
 
     #[test]
