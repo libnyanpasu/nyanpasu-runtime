@@ -5,6 +5,7 @@
 
 mod capability;
 mod config;
+pub mod control;
 mod error;
 mod health;
 pub mod instance;
@@ -18,6 +19,10 @@ pub mod state;
 pub use capability::{Feature, RuntimeFeature};
 pub use clash_api::Host;
 pub use config::runtime_store;
+pub use control::{
+    CheckRequest, ConfigInput, CoreCommand, CoreCommandEnvelope, CoreError, OperationId,
+    OperationOutput, OperationState, ReconcileRequest, payload_digest,
+};
 pub use error::{CoreErrorKind, Error};
 pub use health::{HealthPolicy, probe};
 pub use instance::{Instance, InstanceBuilder};
