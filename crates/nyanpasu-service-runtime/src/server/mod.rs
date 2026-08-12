@@ -29,7 +29,9 @@ pub async fn run(
     let runtime_dir =
         camino::Utf8PathBuf::from_path_buf(crate::utils::dirs::service_core_runtime_dir())
             .map_err(|path| anyhow::anyhow!("core runtime dir is not UTF-8: {}", path.display()))?;
-    let core_manager = CoreManager::new(runtime_dir, local_ipc_policy).await?;
+    let data_dir = camino::Utf8PathBuf::from_path_buf(runtime.nyanpasu_data_dir.clone())
+        .map_err(|path| anyhow::anyhow!("nyanpasu data dir is not UTF-8: {}", path.display()))?;
+    let core_manager = CoreManager::new(runtime_dir, local_ipc_policy, data_dir).await?;
     let hub = EventHub::new();
     core_manager.spawn_bridges(hub.clone());
 

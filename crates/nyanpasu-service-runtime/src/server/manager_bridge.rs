@@ -6,14 +6,21 @@ use std::{
 
 use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
-    ApplyOutcome, ConfigRevision, CoreErrorKind, CoreKind, CoreManager as Manager, CoreSpec,
-    CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, HealthState, HealthStatus,
-    Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel, ManagerOptions,
-    RevisionId,
+    ApplyOutcome, ConfigInput, ConfigRevision, ControlOptions, CoreCommand, CoreCommandEnvelope,
+    CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
+    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, HealthState,
+    HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel,
+    ManagerOptions, OperationId, OperationOutput, OperationState, ReconcileRequest, RevisionId,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
-    core::apply::{ApplyOutcomeKind, CoreApplyData},
+    core::{
+        apply::{ApplyOutcomeKind, CoreApplyData},
+        v2::{
+            CoreCommandInfo, CoreOperationReq, CoreSubmitReq, OperationErrorInfo, OperationInfo,
+            OperationOutputInfo, OperationPhase, ReconcileOutcomeInfo, ReconcileOutcomeKind,
+        },
+    },
     status::{
         ConfigRevisionInfo, CoreControllerInfo, CoreHealthInfo, CoreHealthState, CoreInfos,
         CoreState, CoreStateDetail, RevisionIdInfo,
@@ -36,6 +43,10 @@ const CORE_LOG_TARGET: &str = "nyanpasu_service::core";
 /// bound is testable without the runtime crate's tests interfering with each
 /// other.
 const MAX_CONCURRENT_CHECKS: usize = 2;
+
+/// Long-poll clamp for `/v2/core/operation`, kept well under the route
+/// middleware's 120s liveness bound.
+const MAX_OPERATION_WAIT_MS: u64 = 90_000;
 
 /// Legacy wire strings the GUI branches on. These are protocol, not
 /// diagnostics: changing any of them is a breaking change to clash-nyanpasu.
@@ -105,6 +116,10 @@ impl From<anyhow::Error> for OpError {
 
 struct Inner {
     manager: Manager,
+    /// The v2 control plane over the same manager: bounded queue, idempotency
+    /// registry, cancellation isolation. The v1 methods below keep calling the
+    /// manager directly until the bridge stage deletes them.
+    control: CoreControl,
     /// Wire-type echo: the manager knows nothing about the alpha variants.
     ///
     /// A watch channel rather than a lock, because committing the echo has to be
@@ -115,7 +130,7 @@ struct Inner {
     /// channel would never close and the task would never exit.
     requested_core: watch::Sender<Option<CoreType>>,
     /// Serializes adapter-level control ops and carries the closing latch.
-    control: tokio::sync::Mutex<ControlState>,
+    control_state: tokio::sync::Mutex<ControlState>,
     /// F2 lands here too; see §2.2.
     check_slots: Semaphore,
 }
@@ -133,18 +148,23 @@ impl CoreManagerService {
     pub async fn new(
         runtime_dir: Utf8PathBuf,
         local_ipc_policy: LocalIpcPolicy,
+        data_dir: Utf8PathBuf,
     ) -> Result<Self, anyhow::Error> {
+        let source_dir = runtime_dir.join("v2-sources");
         let manager = Manager::new(ManagerOptions {
             runtime_dir: Some(runtime_dir),
             local_ipc_policy,
             ..ManagerOptions::default()
         })
         .await?;
+        let core_control =
+            CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, data_dir));
         Ok(Self {
             inner: Arc::new(Inner {
                 manager,
+                control: core_control,
                 requested_core: watch::Sender::new(None),
-                control: tokio::sync::Mutex::new(ControlState { closing: false }),
+                control_state: tokio::sync::Mutex::new(ControlState { closing: false }),
                 check_slots: Semaphore::new(MAX_CONCURRENT_CHECKS),
             }),
         })
@@ -186,7 +206,7 @@ impl CoreManagerService {
 
     /// Stop the core and clean runtime artifacts. Idempotent; errors are logged, not returned.
     pub async fn shutdown(&self) {
-        let mut control = self.inner.control.lock().await;
+        let mut control = self.inner.control_state.lock().await;
         if control.closing {
             return;
         }
@@ -204,7 +224,7 @@ impl CoreManagerService {
         core_type: &CoreType,
         config_path: &Utf8Path,
     ) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -236,7 +256,7 @@ impl CoreManagerService {
     }
 
     pub async fn stop(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -248,7 +268,7 @@ impl CoreManagerService {
     }
 
     pub async fn restart(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -273,7 +293,7 @@ impl CoreManagerService {
         config_file: &Path,
         expected_revision: Option<&RevisionIdInfo>,
     ) -> Result<CoreApplyData, OpError> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             return Err(OpError::plain("service is shutting down"));
         }
@@ -312,7 +332,7 @@ impl CoreManagerService {
             // Released before the check runs: it spawns the core binary, and
             // holding the adapter latch across an external process would block
             // start/stop/restart for as long as that takes.
-            let control = self.inner.control.lock().await;
+            let control = self.inner.control_state.lock().await;
             if control.closing {
                 return Err(OpError::plain("service is shutting down"));
             }
@@ -335,7 +355,7 @@ impl CoreManagerService {
     /// confirmed. Idempotent: succeeds when nothing was quarantined.
     #[instrument(skip(self))]
     pub async fn recover(&self) -> Result<(), OpError> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             return Err(OpError::plain("service is shutting down"));
         }
@@ -358,6 +378,92 @@ impl CoreManagerService {
             .manager
             .log_dir()
             .map(|dir| dir.as_std_path().to_path_buf())
+    }
+
+    /// `POST /v2/core/submit`: admission into the control plane. Synchronous —
+    /// the executor owns the transaction from here on, and a dropped
+    /// connection cancels nothing.
+    pub fn submit_v2(
+        &self,
+        infos: &RuntimeInfos,
+        request: &CoreSubmitReq<'_>,
+    ) -> Result<OperationInfo, OpError> {
+        let id: OperationId = request.operation_id.parse().map_err(|_| {
+            OpError::plain(format!("malformed operation id: {}", request.operation_id))
+        })?;
+        let command = match &request.command {
+            CoreCommandInfo::Reconcile {
+                core_type,
+                config,
+                expected_digest,
+                expected_applied,
+            } => {
+                // Binary resolution and kind mapping are host policy; reuse
+                // the v1 spec builder for both. The placeholder config path is
+                // never read — the config ships as bytes and the control plane
+                // materializes it itself.
+                let spec = self.instance_spec(infos, core_type, Utf8PathBuf::new())?;
+                self.watch_reconcile_echo(id, core_type.clone().into_owned());
+                CoreCommand::Reconcile(Box::new(ReconcileRequest {
+                    core: spec.core,
+                    config: ConfigInput::Inline {
+                        bytes: config.as_bytes().to_vec(),
+                        expected_digest: expected_digest.as_ref().map(|digest| digest.to_string()),
+                    },
+                    options: spec.options,
+                    expected_applied: expected_applied.as_ref().map(map_revision_id),
+                }))
+            }
+            CoreCommandInfo::Stop => CoreCommand::Stop,
+            CoreCommandInfo::Recover => CoreCommand::Recover,
+        };
+        let handle = self
+            .inner
+            .control
+            .submit(CoreCommandEnvelope {
+                operation_id: id,
+                command,
+            })
+            .map_err(op_error_from_control)?;
+        Ok(map_operation(handle.id(), handle.state()))
+    }
+
+    /// `POST /v2/core/operation`: registry query, optionally long-polling.
+    pub async fn operation_v2(
+        &self,
+        request: &CoreOperationReq<'_>,
+    ) -> Result<OperationInfo, OpError> {
+        let id: OperationId = request.operation_id.parse().map_err(|_| {
+            OpError::plain(format!("malformed operation id: {}", request.operation_id))
+        })?;
+        let state = match request.wait_ms {
+            Some(wait_ms) => {
+                let bound = std::time::Duration::from_millis(wait_ms.min(MAX_OPERATION_WAIT_MS));
+                self.inner.control.wait_operation(id, bound).await
+            }
+            None => self.inner.control.operation(id),
+        };
+        state.map(|state| map_operation(id, state)).ok_or_else(|| {
+            OpError::plain(format!(
+                "unknown operation {id}: the registry entry was evicted or never existed; \
+                 re-read /v2/core/status and rely on the revision CAS"
+            ))
+        })
+    }
+
+    /// Keeps the v1 wire-type echo truthful for v2 reconciles: committed only
+    /// when the transaction succeeds, observed from the registry rather than
+    /// assumed at admission.
+    fn watch_reconcile_echo(&self, id: OperationId, core_type: CoreType) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let bound = std::time::Duration::from_millis(MAX_OPERATION_WAIT_MS * 2);
+            if let Some(OperationState::Succeeded(_)) =
+                service.inner.control.wait_operation(id, bound).await
+            {
+                service.publish_requested_core(Some(&core_type));
+            }
+        });
     }
 
     /// Publish the wire-type echo the bridge projects into status snapshots.
@@ -601,6 +707,87 @@ fn map_revision_id(info: &RevisionIdInfo) -> RevisionId {
 /// keep every warning. `ApplyOutcome` is not `#[non_exhaustive]`: if the
 /// manager grows a variant, this match must fail to compile rather than
 /// silently mislabel it.
+fn op_error_from_control(error: ControlError) -> OpError {
+    match error.kind {
+        Some(kind) => OpError::with_kind(kind, error.message),
+        None => OpError::plain(error.message),
+    }
+}
+
+fn map_operation(id: OperationId, state: OperationState) -> OperationInfo {
+    let (phase, output, error) = match state {
+        OperationState::Queued => (OperationPhase::Queued, None, None),
+        OperationState::Running => (OperationPhase::Running, None, None),
+        OperationState::Succeeded(output) => (
+            OperationPhase::Succeeded,
+            Some(map_operation_output(output)),
+            None,
+        ),
+        OperationState::Failed(failure) => (
+            OperationPhase::Failed,
+            None,
+            Some(OperationErrorInfo {
+                kind: failure.kind.map(|kind| Cow::Borrowed(kind.as_str())),
+                message: failure.message,
+                retryable: failure.retryable,
+            }),
+        ),
+    };
+    OperationInfo {
+        id: id.to_string(),
+        phase,
+        output,
+        error,
+    }
+}
+
+fn map_operation_output(output: OperationOutput) -> OperationOutputInfo {
+    match output {
+        OperationOutput::Reconciled(outcome) => {
+            OperationOutputInfo::Reconciled(map_reconcile_outcome(&outcome))
+        }
+        OperationOutput::Stopped => OperationOutputInfo::Stopped,
+        OperationOutput::Recovered => OperationOutputInfo::Recovered,
+        OperationOutput::ShutDown => OperationOutputInfo::ShutDown,
+    }
+}
+
+/// The v2 sibling of [`map_apply_outcome`]: same durability unwrapping, plus
+/// the `Started` variant only `reconcile` produces.
+fn map_reconcile_outcome(outcome: &ApplyOutcome) -> ReconcileOutcomeInfo {
+    let mut warnings = Vec::new();
+    let mut current = outcome;
+    while let ApplyOutcome::DurabilityUncertain { outcome, warning } = current {
+        warnings.push(warning.clone());
+        current = &**outcome;
+    }
+    let (kind, revision, failed_apply) = match current {
+        ApplyOutcome::Started { revision } => (ReconcileOutcomeKind::Started, revision, None),
+        ApplyOutcome::Noop { revision } => (ReconcileOutcomeKind::Noop, revision, None),
+        ApplyOutcome::Patched { revision } => (ReconcileOutcomeKind::Patched, revision, None),
+        ApplyOutcome::Reloaded { revision } => (ReconcileOutcomeKind::Reloaded, revision, None),
+        ApplyOutcome::Restarted { revision } => (ReconcileOutcomeKind::Restarted, revision, None),
+        ApplyOutcome::Switched { revision } => (ReconcileOutcomeKind::Switched, revision, None),
+        ApplyOutcome::RolledBack {
+            revision,
+            failed_apply,
+        } => (
+            ReconcileOutcomeKind::RolledBack,
+            revision,
+            Some(failed_apply.clone()),
+        ),
+        ApplyOutcome::DurabilityUncertain { .. } => {
+            unreachable!("unwrapped by the loop above")
+        }
+    };
+    ReconcileOutcomeInfo {
+        outcome: kind,
+        revision: map_revision(revision),
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        failed_apply,
+    }
+}
+
 fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
     let mut warnings = Vec::new();
     let mut current = outcome;
@@ -1265,7 +1452,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let runtime_dir = Utf8PathBuf::from_path_buf(dir.path().join("core-runtime"))
             .expect("temp path is UTF-8");
-        let service = CoreManagerService::new(runtime_dir, LocalIpcPolicy::Disable)
+        let data_dir = Utf8PathBuf::from_path_buf(dir.path().join("nyanpasu-data"))
+            .expect("temp path is UTF-8");
+        let service = CoreManagerService::new(runtime_dir, LocalIpcPolicy::Disable, data_dir)
             .await
             .expect("the manager builds on a fresh runtime dir");
         (dir, service)
