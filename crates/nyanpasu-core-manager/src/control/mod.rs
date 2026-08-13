@@ -21,6 +21,7 @@ use std::sync::{
 
 use camino::Utf8PathBuf;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
+use zerocopy::{ByteEq, ByteHash, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
     error::CoreErrorKind,
@@ -34,19 +35,15 @@ use executor::{Admission, ExecutorContext, ExecutorWork, Registry};
 
 /// Correlation, idempotency, and event-tracing identity of one control
 /// request. Not a lease, a session, or a lock: it never grants ownership and
-/// never blocks another operation (design §9.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct OperationId([u8; 16]);
+/// never blocks another operation
+#[derive(Debug, Clone, Copy, FromBytes, IntoBytes, KnownLayout, ByteEq, ByteHash, Immutable)]
+pub struct OperationId {
+    pub nanos: u64,
+    pub pid: u32,
+    pub counter: u32,
+}
 
 impl OperationId {
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-
     /// Convenience generator for local callers that do not carry their own id.
     ///
     /// Uniqueness comes from (unix nanos, pid, process-local counter). This is
@@ -58,20 +55,21 @@ impl OperationId {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&nanos.to_be_bytes());
-        bytes[8..12].copy_from_slice(&std::process::id().to_be_bytes());
-        bytes[12..16].copy_from_slice(&COUNTER.fetch_add(1, Ordering::Relaxed).to_be_bytes());
-        Self(bytes)
+        Self {
+            nanos,
+            pid: std::process::id(),
+            counter: COUNTER.fetch_add(1, Ordering::Relaxed),
+        }
     }
 }
 
 impl std::fmt::Display for OperationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
+        write!(
+            f,
+            "{:016x}-{:08x}-{:08x}",
+            self.nanos, self.pid, self.counter
+        )
     }
 }
 
@@ -80,7 +78,7 @@ pub struct ParseOperationIdError;
 
 impl std::fmt::Display for ParseOperationIdError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("an operation id is exactly 32 lowercase hex characters")
+        f.write_str("an operation id must be lowercase hexadecimal in 16-8-8 format")
     }
 }
 
@@ -90,15 +88,22 @@ impl std::str::FromStr for OperationId {
     type Err = ParseOperationIdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 32 || !value.is_ascii() {
+        let (nanos, rest) = value.split_once('-').ok_or(ParseOperationIdError)?;
+        let (pid, counter) = rest.split_once('-').ok_or(ParseOperationIdError)?;
+        if nanos.len() != 16
+            || pid.len() != 8
+            || counter.len() != 8
+            || !value
+                .bytes()
+                .all(|byte| byte == b'-' || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(ParseOperationIdError);
         }
-        let mut bytes = [0u8; 16];
-        for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-            let chunk = std::str::from_utf8(chunk).map_err(|_| ParseOperationIdError)?;
-            bytes[index] = u8::from_str_radix(chunk, 16).map_err(|_| ParseOperationIdError)?;
-        }
-        Ok(Self(bytes))
+        Ok(Self {
+            nanos: u64::from_str_radix(nanos, 16).map_err(|_| ParseOperationIdError)?,
+            pid: u32::from_str_radix(pid, 16).map_err(|_| ParseOperationIdError)?,
+            counter: u32::from_str_radix(counter, 16).map_err(|_| ParseOperationIdError)?,
+        })
     }
 }
 
@@ -564,18 +569,29 @@ mod tests {
 
     #[test]
     fn operation_ids_roundtrip_through_hex() {
-        let id = OperationId::from_bytes([
-            0x00, 0x01, 0x0a, 0x10, 0x7f, 0x80, 0xff, 0x42, 0x00, 0x01, 0x0a, 0x10, 0x7f, 0x80,
-            0xff, 0x42,
-        ]);
+        let id = OperationId {
+            nanos: 0x0001_0a10_7f80_ff42,
+            pid: 0x0001_0a10,
+            counter: 0x7f80_ff42,
+        };
         let text = id.to_string();
-        assert_eq!(text.len(), 32);
+        assert_eq!(text, "00010a107f80ff42-00010a10-7f80ff42");
         assert_eq!(OperationId::from_str(&text).unwrap(), id);
     }
 
     #[test]
     fn malformed_operation_ids_are_rejected() {
-        for bad in ["", "abc", &"a".repeat(31), &"g".repeat(32), &"a".repeat(33)] {
+        for bad in [
+            "",
+            "abc",
+            "00010a107f80ff4200010a107f80ff42",
+            "00010A107f80ff42-00010a10-7f80ff42",
+            "00010g107f80ff42-00010a10-7f80ff42",
+            "00010a107f80ff4-00010a10-7f80ff42",
+            "00010a107f80ff42-00010a1-7f80ff42",
+            "00010a107f80ff42-00010a10-7f80ff4",
+            "00010a107f80ff42-00010a10-7f80ff42-extra",
+        ] {
             assert_eq!(OperationId::from_str(bad), Err(ParseOperationIdError));
         }
     }
@@ -602,13 +618,21 @@ mod tests {
 
         let unclassified = CoreError::from_domain(
             &crate::Error::Io(std::io::Error::other("boom")),
-            Some(OperationId::from_bytes([7; 16])),
+            Some(OperationId {
+                nanos: 7,
+                pid: 7,
+                counter: 7,
+            }),
         );
         assert_eq!(unclassified.kind, None);
         assert!(!unclassified.retryable);
         assert_eq!(
             unclassified.operation_id,
-            Some(OperationId::from_bytes([7; 16]))
+            Some(OperationId {
+                nanos: 7,
+                pid: 7,
+                counter: 7,
+            })
         );
     }
 

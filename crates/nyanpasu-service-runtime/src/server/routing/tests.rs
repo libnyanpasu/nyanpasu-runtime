@@ -550,7 +550,7 @@ async fn v2_submit_stop_runs_to_a_classified_terminal_failure() {
         CoreOperationRes, CoreSubmitReq, CoreSubmitRes, OperationPhase,
     };
     let env = TestEnv::new().await;
-    let id = "00112233445566778899aabbccddeeff";
+    let id = "0011223344556677-8899aabb-ccddeeff";
     let response = post_json(
         env.state.clone(),
         CORE_V2_SUBMIT_ENDPOINT,
@@ -594,7 +594,7 @@ async fn v2_submit_reuses_of_an_id_with_a_different_payload_conflict() {
         CORE_V2_SUBMIT_ENDPOINT, CoreCommandInfo, CoreSubmitReq, CoreSubmitRes,
     };
     let env = TestEnv::new().await;
-    let id = "00112233445566778899aabbccddeeff";
+    let id = "0011223344556677-8899aabb-ccddeeff";
     let response = post_json(
         env.state.clone(),
         CORE_V2_SUBMIT_ENDPOINT,
@@ -647,7 +647,7 @@ async fn v2_operation_rejects_malformed_and_unknown_ids() {
         env.state.clone(),
         CORE_V2_OPERATION_ENDPOINT,
         &CoreOperationReq {
-            operation_id: Cow::Borrowed("ffeeddccbbaa99887766554433221100"),
+            operation_id: Cow::Borrowed("ffeeddccbbaa9988-77665544-33221100"),
             wait_ms: None,
         },
     )
