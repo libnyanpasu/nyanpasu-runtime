@@ -42,18 +42,26 @@ pub(super) struct Registry {
 struct RegistryInner {
     operations: HashMap<OperationId, RegisteredOperation>,
     order: VecDeque<OperationId>,
+    next_sequence: u64,
 }
 
 struct RegisteredOperation {
     digest: String,
+    sequence: u64,
     state_tx: watch::Sender<OperationState>,
+}
+
+/// One admitted operation's place in the queue, and the channel to watch it on.
+pub(super) struct Admitted {
+    pub(super) sequence: u64,
+    pub(super) state_rx: watch::Receiver<OperationState>,
 }
 
 pub(super) enum Admission {
     /// New registration; the caller must enqueue the work.
-    Registered(watch::Receiver<OperationState>),
+    Registered(Admitted),
     /// Same id + same digest: the original operation, wherever it is.
-    Existing(watch::Receiver<OperationState>),
+    Existing(Admitted),
 }
 
 impl Registry {
@@ -62,6 +70,7 @@ impl Registry {
             inner: parking_lot::Mutex::new(RegistryInner {
                 operations: HashMap::new(),
                 order: VecDeque::new(),
+                next_sequence: 0,
             }),
             capacity,
         }
@@ -84,7 +93,10 @@ impl Registry {
         let mut inner = self.inner.lock();
         if let Some(existing) = inner.operations.get(&id) {
             if existing.digest == digest {
-                return Ok(Admission::Existing(existing.state_tx.subscribe()));
+                return Ok(Admission::Existing(Admitted {
+                    sequence: existing.sequence,
+                    state_rx: existing.state_tx.subscribe(),
+                }));
             }
             return Err(CoreError::new(
                 CoreErrorKind::OperationConflict,
@@ -110,10 +122,17 @@ impl Registry {
             inner.operations.remove(&evicted);
         }
         let (state_tx, state_rx) = watch::channel(OperationState::Queued);
+        // Assigned here, not by the caller: this is the same critical section
+        // the enqueue happens in, so the sequence is the order the executor
+        // will actually run these in. A caller that stamps its own would be
+        // stamping submit order, which two concurrent submits can invert.
+        let sequence = inner.next_sequence;
+        inner.next_sequence += 1;
         inner.operations.insert(
             id,
             RegisteredOperation {
                 digest: digest.to_owned(),
+                sequence,
                 state_tx,
             },
         );
@@ -135,7 +154,7 @@ impl Registry {
             };
             return Err(error.with_operation(id));
         }
-        Ok(Admission::Registered(state_rx))
+        Ok(Admission::Registered(Admitted { sequence, state_rx }))
     }
 
     pub(super) fn set(&self, id: OperationId, state: OperationState) {

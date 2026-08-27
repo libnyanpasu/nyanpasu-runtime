@@ -425,25 +425,26 @@ impl CoreControl {
             id,
             command: envelope.command,
         };
-        let (state_rx, newly_admitted) = match self
+        let (admitted, newly_admitted) = match self
             .registry
             .admit(id, &digest, || self.work_tx.try_send(work))?
         {
-            Admission::Existing(state_rx) => (state_rx, false),
-            Admission::Registered(state_rx) => {
+            Admission::Existing(admitted) => (admitted, false),
+            Admission::Registered(admitted) => {
                 // Only after the work is queued: a latch set beside a rejected
                 // enqueue would refuse every later submit for a shutdown that
                 // never happened.
                 if is_shutdown {
                     self.closing.store(true, Ordering::Release);
                 }
-                (state_rx, true)
+                (admitted, true)
             }
         };
         Ok(OperationHandle {
             id,
-            state_rx,
+            state_rx: admitted.state_rx,
             newly_admitted,
+            sequence: admitted.sequence,
         })
     }
 
@@ -477,16 +478,17 @@ impl CoreControl {
         let id = OperationId::generate();
         let command = CoreCommand::Shutdown;
         let digest = command.payload_digest();
-        let state_rx = match self.registry.admit(id, &digest, move || {
+        let admitted = match self.registry.admit(id, &digest, move || {
             permit.send(ExecutorWork { id, command });
             Ok(())
         })? {
-            Admission::Registered(state_rx) | Admission::Existing(state_rx) => state_rx,
+            Admission::Registered(admitted) | Admission::Existing(admitted) => admitted,
         };
         OperationHandle {
             id,
-            state_rx,
+            state_rx: admitted.state_rx,
             newly_admitted: true,
+            sequence: admitted.sequence,
         }
         .wait()
         .await
@@ -605,6 +607,7 @@ pub struct OperationHandle {
     id: OperationId,
     state_rx: watch::Receiver<OperationState>,
     newly_admitted: bool,
+    sequence: u64,
 }
 
 impl OperationHandle {
@@ -617,6 +620,18 @@ impl OperationHandle {
     /// that start per-operation work on admission use it to start it once.
     pub fn newly_admitted(&self) -> bool {
         self.newly_admitted
+    }
+
+    /// Where this operation sits in the executor's run order, counted from the
+    /// control plane's start.
+    ///
+    /// It exists for hosts that mirror an operation's effect somewhere else and
+    /// have to apply those mirrors in the order the transactions committed:
+    /// operations run serially, but whatever watches them does not, so two
+    /// completions can be observed out of order and a stale one would overwrite
+    /// the current value.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
     }
 
     pub fn state(&self) -> OperationState {

@@ -10,8 +10,8 @@ use nyanpasu_core_manager::{
     CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
     CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, ExecutorExit,
     HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame,
-    LogLevel, ManagerOptions, OperationId, OperationOutput, OperationState, ReconcileRequest,
-    RevisionId,
+    LogLevel, ManagerOptions, OperationHandle, OperationId, OperationOutput, OperationState,
+    ReconcileRequest, RevisionId,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
@@ -136,6 +136,13 @@ struct Inner {
     /// `Arc<Inner>` inside that task would keep the manager alive, so its watch
     /// channel would never close and the task would never exit.
     requested_core: watch::Sender<Option<CoreType>>,
+    /// The executor sequence of the newest reconcile whose echo has been
+    /// applied. Reconciles run serially, but the tasks watching them do not:
+    /// two completions can be observed in either order, and applying the older
+    /// one second would leave the wire claiming a type the runtime no longer
+    /// has. Guarding the read-compare-write together is what makes the echo
+    /// last-writer-by-execution-order rather than last-observer-wins.
+    echo_applied: parking_lot::Mutex<Option<u64>>,
     /// Serializes adapter-level control ops and carries the closing latch.
     control_state: tokio::sync::Mutex<ControlState>,
     /// F2 lands here too; see §2.2.
@@ -171,6 +178,7 @@ impl CoreManagerService {
                 manager,
                 control: core_control,
                 requested_core: watch::Sender::new(None),
+                echo_applied: parking_lot::Mutex::new(None),
                 control_state: tokio::sync::Mutex::new(ControlState { closing: false }),
                 check_slots: Semaphore::new(MAX_CONCURRENT_CHECKS),
             }),
@@ -427,6 +435,7 @@ impl CoreManagerService {
         let id: OperationId = request.operation_id.parse().map_err(|_| {
             OpError::plain(format!("malformed operation id: {}", request.operation_id))
         })?;
+        let mut echoed_core = None;
         let command = match &request.command {
             CoreCommandInfo::Reconcile {
                 core_type,
@@ -439,7 +448,7 @@ impl CoreManagerService {
                 // never read — the config ships as bytes and the control plane
                 // materializes it itself.
                 let spec = self.instance_spec(infos, core_type, Utf8PathBuf::new())?;
-                self.watch_reconcile_echo(id, core_type.clone().into_owned());
+                echoed_core = Some(core_type.clone().into_owned());
                 CoreCommand::Reconcile(Box::new(ReconcileRequest {
                     core: spec.core,
                     config: ConfigInput::Inline {
@@ -461,7 +470,16 @@ impl CoreManagerService {
                 command,
             })
             .map_err(op_error_from_control)?;
-        Ok(map_operation(handle.id(), handle.state()))
+        let admitted = map_operation(handle.id(), handle.state());
+        // After admission, and only for the submit that registered it: a
+        // rejected envelope must leave no watcher behind, and an idempotent
+        // re-submit must not add a second one to the same operation.
+        if let Some(core_type) = echoed_core
+            && handle.newly_admitted()
+        {
+            self.watch_reconcile_echo(handle, core_type);
+        }
+        Ok(admitted)
     }
 
     /// `POST /v2/core/operation`: registry query, optionally long-polling.
@@ -488,16 +506,43 @@ impl CoreManagerService {
     }
 
     /// Keeps the v1 wire-type echo truthful for v2 reconciles: committed only
-    /// when the transaction succeeds, observed from the registry rather than
-    /// assumed at admission.
-    fn watch_reconcile_echo(&self, id: OperationId, core_type: CoreType) {
+    /// when the transaction actually put that core type in place, observed
+    /// from the operation itself rather than assumed at admission.
+    ///
+    /// No bound on the wait: every operation reaches a terminal state, an
+    /// executor death included, so the watcher always ends.
+    fn watch_reconcile_echo(&self, handle: OperationHandle, core_type: CoreType) {
         let service = self.clone();
+        let sequence = handle.sequence();
         tokio::spawn(async move {
-            let bound = std::time::Duration::from_millis(MAX_OPERATION_WAIT_MS * 2);
-            if let Some(OperationState::Succeeded(_)) =
-                service.inner.control.wait_operation(id, bound).await
+            let state = match handle.wait().await {
+                Ok(output) => OperationState::Succeeded(output),
+                Err(error) => OperationState::Failed(error),
+            };
+            let commits = echo_commits(&state);
+            if !commits
+                && !matches!(
+                    state,
+                    OperationState::Succeeded(OperationOutput::Reconciled(_))
+                )
             {
+                // The transaction never reached a commit point, so it says
+                // nothing about the echo either way.
+                return;
+            }
+            let mut applied = service.inner.echo_applied.lock();
+            if applied.is_some_and(|latest| latest >= sequence) {
+                // A later reconcile already had the last word.
+                return;
+            }
+            *applied = Some(sequence);
+            if commits {
                 service.publish_requested_core(Some(&core_type));
+            } else {
+                // A rollback restored the old spec, so the echo must not claim
+                // the requested type — but the revision and state still moved,
+                // so clients need the fresh snapshot. Same rule as v1 apply.
+                service.publish_requested_core(None);
             }
         });
     }
@@ -743,6 +788,20 @@ fn map_revision_id(info: &RevisionIdInfo) -> RevisionId {
 /// keep every warning. `ApplyOutcome` is not `#[non_exhaustive]`: if the
 /// manager grows a variant, this match must fail to compile rather than
 /// silently mislabel it.
+/// Whether an operation's terminal state committed the core type it asked for.
+/// Only a reconcile can, and only one that was not rolled back:
+/// `DurabilityUncertain` wraps the real outcome and is unwrapped first.
+fn echo_commits(state: &OperationState) -> bool {
+    let OperationState::Succeeded(OperationOutput::Reconciled(outcome)) = state else {
+        return false;
+    };
+    let mut effective = outcome;
+    while let ApplyOutcome::DurabilityUncertain { outcome, .. } = effective {
+        effective = &**outcome;
+    }
+    !matches!(effective, ApplyOutcome::RolledBack { .. })
+}
+
 fn op_error_from_control(error: ControlError) -> OpError {
     match error.kind {
         Some(kind) => OpError::with_kind(kind, error.message),
@@ -1810,6 +1869,68 @@ mod tests {
         assert!(infos.health.is_none());
         assert!(infos.revision.is_none());
         assert!(infos.config_path.is_none());
+    }
+
+    /// The echo names the core type a reconcile *put in place*. Anything else
+    /// — a rollback, a non-reconcile outcome, a failure — must leave it alone.
+    #[test]
+    fn only_a_committed_reconcile_moves_the_wire_type_echo() {
+        for outcome in [
+            ApplyOutcome::Started {
+                revision: revision(1),
+            },
+            ApplyOutcome::Noop {
+                revision: revision(2),
+            },
+            ApplyOutcome::Patched {
+                revision: revision(3),
+            },
+            ApplyOutcome::Reloaded {
+                revision: revision(4),
+            },
+            ApplyOutcome::Restarted {
+                revision: revision(5),
+            },
+            ApplyOutcome::Switched {
+                revision: revision(6),
+            },
+        ] {
+            assert!(
+                super::echo_commits(&OperationState::Succeeded(OperationOutput::Reconciled(
+                    outcome.clone()
+                ))),
+                "{outcome:?} committed the requested core type"
+            );
+        }
+
+        let rolled_back = ApplyOutcome::RolledBack {
+            revision: revision(7),
+            failed_apply: "boom".to_owned(),
+        };
+        for outcome in [
+            rolled_back.clone(),
+            ApplyOutcome::DurabilityUncertain {
+                outcome: Box::new(rolled_back),
+                warning: "the parent directory was not synced".to_owned(),
+            },
+        ] {
+            assert!(!super::echo_commits(&OperationState::Succeeded(
+                OperationOutput::Reconciled(outcome)
+            )));
+        }
+
+        for output in [
+            OperationOutput::Stopped,
+            OperationOutput::Recovered,
+            OperationOutput::ShutDown,
+        ] {
+            assert!(!super::echo_commits(&OperationState::Succeeded(output)));
+        }
+        assert!(!super::echo_commits(&OperationState::Queued));
+        assert!(!super::echo_commits(&OperationState::Running));
+        assert!(!super::echo_commits(&OperationState::Failed(
+            ControlError::new(CoreErrorKind::InvalidConfig, "bad", false)
+        )));
     }
 }
 
