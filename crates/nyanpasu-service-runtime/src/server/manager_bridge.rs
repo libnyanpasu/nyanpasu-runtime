@@ -8,9 +8,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
     ApplyOutcome, ConfigInput, ConfigRevision, ControlOptions, CoreCommand, CoreCommandEnvelope,
     CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
-    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, HealthState,
-    HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel,
-    ManagerOptions, OperationId, OperationOutput, OperationState, ReconcileRequest, RevisionId,
+    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, ExecutorExit,
+    HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame,
+    LogLevel, ManagerOptions, OperationId, OperationOutput, OperationState, ReconcileRequest,
+    RevisionId,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
@@ -47,6 +48,12 @@ const MAX_CONCURRENT_CHECKS: usize = 2;
 /// Long-poll clamp for `/v2/core/operation`, kept well under the route
 /// middleware's 120s liveness bound.
 const MAX_OPERATION_WAIT_MS: u64 = 90_000;
+
+/// Upper bound on the executor-first shutdown: the transaction already in
+/// flight has to finish before the queued `Shutdown` can run. Exceeding it is
+/// reported, never waited out — a leaked core is collected by the next
+/// construction's orphan sweep, a hung daemon exit is not collected by anything.
+const CORE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Legacy wire strings the GUI branches on. These are protocol, not
 /// diagnostics: changing any of them is a breaking change to clash-nyanpasu.
@@ -205,6 +212,12 @@ impl CoreManagerService {
     }
 
     /// Stop the core and clean runtime artifacts. Idempotent; errors are logged, not returned.
+    ///
+    /// The stop goes through the v2 executor, which owns the closing latch:
+    /// calling the manager directly would leave the executor accepting work,
+    /// and a reconcile queued a moment earlier would put a core back up behind
+    /// the shutdown that was supposed to end it. The v1 latch below is kept
+    /// only as the v1 routing mirror it always was.
     pub async fn shutdown(&self) {
         let mut control = self.inner.control_state.lock().await;
         if control.closing {
@@ -212,9 +225,32 @@ impl CoreManagerService {
         }
         control.closing = true;
         drop(control);
-        if let Err(error) = self.inner.manager.shutdown().await {
-            tracing::error!("failed to stop the core on shutdown: {error}");
+
+        match tokio::time::timeout(CORE_SHUTDOWN_TIMEOUT, self.inner.control.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if self.inner.control.executor_is_closed() => {
+                // Not a bypass: with the executor gone there is no transaction
+                // owner left, and the manager is the only remaining way to stop
+                // a core this process still owns.
+                tracing::error!(
+                    "the control executor is gone ({error}); stopping the core directly"
+                );
+                if let Err(error) = self.inner.manager.shutdown().await {
+                    tracing::error!("failed to stop the core on shutdown: {error}");
+                }
+            }
+            Ok(Err(error)) => tracing::error!("failed to stop the core on shutdown: {error}"),
+            Err(_) => tracing::error!(
+                "the core did not shut down within {CORE_SHUTDOWN_TIMEOUT:?}; \
+                 leaving it to the next orphan sweep"
+            ),
         }
+    }
+
+    /// Resolves when the v2 control executor exits, so the daemon can refuse to
+    /// keep serving a control plane that is no longer there.
+    pub async fn until_control_closed(&self) -> ExecutorExit {
+        self.inner.control.until_closed().await
     }
 
     #[instrument(skip(self, infos))]

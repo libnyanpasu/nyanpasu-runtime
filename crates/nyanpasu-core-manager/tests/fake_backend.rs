@@ -343,3 +343,41 @@ async fn an_executor_panic_gives_every_operation_a_terminal_state_and_reports_di
         .unwrap_err();
     assert_eq!(error.kind, Some(CoreErrorKind::ShuttingDown));
 }
+
+/// The latch has to land before the command is queued. With the old order a
+/// reconcile that was already waiting still ran, so a shutdown could hand back
+/// a *running* core.
+#[tokio::test]
+async fn shutdown_refuses_already_queued_work_and_reports_clean() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let backend = Arc::new(FakeBackend::default());
+    backend.gate_launch.store(true, Ordering::SeqCst);
+    let control = control_with_backend(&dir, backend.clone()).await;
+    let binary = common::fake_core_bin();
+
+    let running = control
+        .submit(reconcile_envelope(&dir, binary.clone()))
+        .unwrap();
+    backend.launch_started.notified().await;
+    let queued = control.submit(reconcile_envelope(&dir, binary)).unwrap();
+
+    let shutting_down = tokio::spawn({
+        let control = control.clone();
+        async move { control.shutdown().await }
+    });
+    backend.release_launch.notify_one();
+
+    running.wait().await.unwrap();
+    let error = queued.wait().await.unwrap_err();
+    assert_eq!(error.kind, Some(CoreErrorKind::ShuttingDown));
+    shutting_down.await.unwrap().unwrap();
+    assert_eq!(
+        control.until_closed().await,
+        nyanpasu_core_manager::ExecutorExit::Clean
+    );
+    assert_eq!(
+        backend.launched_epochs.lock().unwrap().len(),
+        1,
+        "the queued reconcile must not launch a core behind the shutdown"
+    );
+}

@@ -680,3 +680,29 @@ async fn v2_status_serves_the_canonical_projection() {
     assert!(matches!(infos.state, CoreState::Stopped(_)));
     assert!(infos.r#type.is_none(), "no core was ever requested");
 }
+
+/// Daemon shutdown used to call the manager directly, which left the v2
+/// control plane wide open: a submit that landed a moment later was admitted
+/// and ran a core transaction after the daemon had already stopped its core.
+#[tokio::test]
+async fn shutdown_closes_the_v2_control_plane_to_new_work() {
+    use nyanpasu_ipc::api::core::v2::{
+        CORE_V2_SUBMIT_ENDPOINT, CoreCommandInfo, CoreSubmitReq, CoreSubmitRes,
+    };
+    let env = TestEnv::new().await;
+    env.state.core_manager.shutdown().await;
+
+    let response = post_json(
+        env.state.clone(),
+        CORE_V2_SUBMIT_ENDPOINT,
+        &CoreSubmitReq {
+            operation_id: Cow::Borrowed("0011223344556677-8899aabb-ccddeeff"),
+            command: CoreCommandInfo::Stop,
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let envelope: CoreSubmitRes<'static> = body_of(response).await;
+    assert_eq!(envelope.code, ResponseCode::OtherError);
+    assert_eq!(envelope.error_kind.as_deref(), Some("shutting_down"));
+}

@@ -447,6 +447,59 @@ impl CoreControl {
         })
     }
 
+    /// Shuts the control plane down through its own executor, and waits.
+    ///
+    /// The latch goes down *before* the command is queued — the reverse of
+    /// `submit(Shutdown)`, and the whole point: work already waiting in the
+    /// queue is refused by the executor instead of running behind the
+    /// shutdown. A host that stops the core by any other route can watch its
+    /// own shutdown put a core back up.
+    ///
+    /// Queue pressure waits rather than answering `QueueFull`: everything in
+    /// front is about to be refused, so a slot frees promptly.
+    pub async fn shutdown(&self) -> Result<(), CoreError> {
+        self.closing.store(true, Ordering::Release);
+        let permit = match self.work_tx.reserve().await {
+            Ok(permit) => permit,
+            // The executor already exited; there is nothing left to run a
+            // shutdown, so report how it went instead of inventing one.
+            Err(_) => {
+                return match self.until_closed().await {
+                    ExecutorExit::Clean => Ok(()),
+                    ExecutorExit::Died => Err(CoreError::new(
+                        CoreErrorKind::Internal,
+                        "the control executor died",
+                        false,
+                    )),
+                };
+            }
+        };
+        let id = OperationId::generate();
+        let command = CoreCommand::Shutdown;
+        let digest = command.payload_digest();
+        let state_rx = match self.registry.admit(id, &digest, move || {
+            permit.send(ExecutorWork { id, command });
+            Ok(())
+        })? {
+            Admission::Registered(state_rx) | Admission::Existing(state_rx) => state_rx,
+        };
+        OperationHandle {
+            id,
+            state_rx,
+            newly_admitted: true,
+        }
+        .wait()
+        .await
+        .map(drop)
+    }
+
+    /// Whether the executor is gone: its receiver was dropped, so nothing can
+    /// own a transaction any more. A host uses this to tell a failed shutdown
+    /// apart from one that had no executor to run it.
+    pub fn executor_is_closed(&self) -> bool {
+        self.work_tx.is_closed()
+    }
+
     /// Zero-mailbox snapshot read.
     pub fn status(&self) -> CoreStatus {
         self.manager.status()
