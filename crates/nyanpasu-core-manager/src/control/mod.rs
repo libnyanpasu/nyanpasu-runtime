@@ -176,8 +176,14 @@ pub enum CoreCommand {
 impl CoreCommand {
     /// The identity digest the idempotency registry compares: two envelopes
     /// with the same [`OperationId`] must describe the same work. Config
-    /// bytes, the desired core, and the CAS token are identity; tuning fields
-    /// ([`InstanceOptions`]) deliberately are not.
+    /// bytes, the desired core, the CAS token, and the declared config digest
+    /// are identity; tuning fields ([`InstanceOptions`]) deliberately are not.
+    ///
+    /// A corrected `expected_digest` is therefore a *different* envelope: the
+    /// two describe different claims about the same bytes, and re-submitting
+    /// under the original id answers `OperationConflict` rather than replaying
+    /// the first attempt's `InvalidConfig`. Callers that fix a digest must use
+    /// a fresh id.
     pub fn payload_digest(&self) -> String {
         use std::fmt::Write;
         match self {
@@ -197,8 +203,14 @@ impl CoreCommand {
                 }
                 identity.push('\0');
                 let mut payload = identity.into_bytes();
-                let ConfigInput::Inline { bytes, .. } = &request.config;
+                let ConfigInput::Inline {
+                    bytes,
+                    expected_digest,
+                } = &request.config;
                 payload.extend_from_slice(bytes);
+                payload.extend_from_slice(b"\0digest:");
+                payload
+                    .extend_from_slice(expected_digest.as_deref().unwrap_or_default().as_bytes());
                 payload_digest(&payload)
             }
             Self::Stop => payload_digest(b"stop"),
@@ -361,7 +373,10 @@ impl CoreControl {
             registry_capacity,
             check_concurrency,
         } = options;
-        let registry = Arc::new(Registry::new(registry_capacity));
+        let registry = Arc::new(Registry::new(live_registry_capacity(
+            registry_capacity,
+            queue_capacity,
+        )));
         let (work_tx, work_rx) = mpsc::channel(queue_capacity);
         let (done_tx, done_rx) = watch::channel(false);
         let context = ExecutorContext {
@@ -400,42 +415,31 @@ impl CoreControl {
             .with_operation(id));
         }
         let digest = envelope.command.payload_digest();
-        let state_rx = match self.registry.admit(id, &digest)? {
-            Admission::Existing(state_rx) => state_rx,
+        let is_shutdown = matches!(envelope.command, CoreCommand::Shutdown);
+        let work = ExecutorWork {
+            id,
+            command: envelope.command,
+        };
+        let (state_rx, newly_admitted) = match self
+            .registry
+            .admit(id, &digest, || self.work_tx.try_send(work))?
+        {
+            Admission::Existing(state_rx) => (state_rx, false),
             Admission::Registered(state_rx) => {
-                let is_shutdown = matches!(envelope.command, CoreCommand::Shutdown);
-                match self.work_tx.try_send(ExecutorWork {
-                    id,
-                    command: envelope.command,
-                }) {
-                    Ok(()) => {
-                        if is_shutdown {
-                            self.closing.store(true, Ordering::Release);
-                        }
-                        state_rx
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        self.registry.remove(id);
-                        return Err(CoreError::new(
-                            CoreErrorKind::QueueFull,
-                            "the operation queue is full",
-                            true,
-                        )
-                        .with_operation(id));
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        self.registry.remove(id);
-                        return Err(CoreError::new(
-                            CoreErrorKind::Internal,
-                            "the control executor is gone",
-                            false,
-                        )
-                        .with_operation(id));
-                    }
+                // Only after the work is queued: a latch set beside a rejected
+                // enqueue would refuse every later submit for a shutdown that
+                // never happened.
+                if is_shutdown {
+                    self.closing.store(true, Ordering::Release);
                 }
+                (state_rx, true)
             }
         };
-        Ok(OperationHandle { id, state_rx })
+        Ok(OperationHandle {
+            id,
+            state_rx,
+            newly_admitted,
+        })
     }
 
     /// Zero-mailbox snapshot read.
@@ -490,8 +494,11 @@ impl CoreControl {
             )
         })?;
         let ConfigInput::Inline { bytes, .. } = &request.config;
-        let file_name = format!("check-source-{}.yaml", payload_digest(bytes));
         let id = OperationId::generate();
+        // The id, not just the digest: two concurrent checks of the same bytes
+        // must not share a file, or the first one to finish deletes the source
+        // the other is still reading.
+        let file_name = format!("check-source-{}-{id}.yaml", payload_digest(bytes));
         let config_path =
             executor::materialize(&self.source_dir, &file_name, request.config, id).await?;
         let spec = InstanceSpec {
@@ -502,8 +509,7 @@ impl CoreControl {
             options: InstanceOptions::default(),
         };
         let result = self.manager.check_config(&spec).await;
-        // Best-effort cleanup; a concurrent same-digest check rewrites the
-        // same bytes, so a failed removal is harmless.
+        // Best-effort cleanup of this call's own source file.
         let _ = tokio::fs::remove_file(&config_path).await;
         result.map_err(|error| CoreError::from_domain(&error, None))
     }
@@ -524,6 +530,15 @@ impl CoreControl {
     }
 }
 
+/// The registry bound the executor actually runs with: at most
+/// `queue_capacity` operations wait while one runs outside the queue, so a
+/// smaller configured bound is raised rather than honored. A misconfigured
+/// host should not turn into a run-time `QueueFull`; the invariant "every live
+/// operation has a registry entry" holds by construction instead.
+fn live_registry_capacity(registry_capacity: usize, queue_capacity: usize) -> usize {
+    registry_capacity.max(queue_capacity.saturating_add(1))
+}
+
 /// A submitted operation. `wait` consumes the handle and resolves with the
 /// terminal result; `state` polls without consuming. Dropping the handle
 /// leaves the operation running to its safe terminal state.
@@ -531,11 +546,19 @@ impl CoreControl {
 pub struct OperationHandle {
     id: OperationId,
     state_rx: watch::Receiver<OperationState>,
+    newly_admitted: bool,
 }
 
 impl OperationHandle {
     pub fn id(&self) -> OperationId {
         self.id
+    }
+
+    /// Whether this handle registered the operation, as opposed to attaching
+    /// to one that was already submitted under the same id and payload. Hosts
+    /// that start per-operation work on admission use it to start it once.
+    pub fn newly_admitted(&self) -> bool {
+        self.newly_admitted
     }
 
     pub fn state(&self) -> OperationState {
@@ -634,6 +657,37 @@ mod tests {
                 counter: 7,
             })
         );
+    }
+
+    #[test]
+    fn the_registry_bound_is_clamped_to_hold_every_live_operation() {
+        // A host that configures fewer registry slots than the queue can hold
+        // gets the queue bound plus the running operation, not its own number.
+        assert_eq!(live_registry_capacity(1, 2), 3);
+        assert_eq!(live_registry_capacity(64, 16), 64);
+    }
+
+    #[test]
+    fn a_corrected_declared_digest_is_a_different_payload() {
+        let request = |expected_digest: Option<&str>| ReconcileRequest {
+            core: CoreSpec {
+                kind: crate::kind::CoreKind::Mihomo,
+                binary_path: Utf8PathBuf::from("core"),
+                version: None,
+                features: Vec::new(),
+            },
+            config: ConfigInput::Inline {
+                bytes: b"mixed-port: 7890\n".to_vec(),
+                expected_digest: expected_digest.map(str::to_owned),
+            },
+            options: InstanceOptions::default(),
+            expected_applied: None,
+        };
+        let wrong = CoreCommand::Reconcile(Box::new(request(Some("0000000000000000"))));
+        let right = CoreCommand::Reconcile(Box::new(request(Some("1111111111111111"))));
+        let absent = CoreCommand::Reconcile(Box::new(request(None)));
+        assert_ne!(wrong.payload_digest(), right.payload_digest());
+        assert_ne!(wrong.payload_digest(), absent.payload_digest());
     }
 
     #[test]

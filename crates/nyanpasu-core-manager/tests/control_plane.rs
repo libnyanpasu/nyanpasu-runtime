@@ -130,6 +130,8 @@ async fn an_idempotent_resubmit_attaches_to_the_original_operation() {
     let id = OperationId::generate();
     let first = control.submit(reconcile_envelope(id, &dir, &body)).unwrap();
     let second = control.submit(reconcile_envelope(id, &dir, &body)).unwrap();
+    assert!(first.newly_admitted(), "the first submit registers it");
+    assert!(!second.newly_admitted(), "the second attaches to it");
     let first = first.wait().await.unwrap();
     let second = second.wait().await.unwrap();
     // One operation, one start: both callers observe the identical outcome.
@@ -211,14 +213,28 @@ async fn a_full_queue_answers_queue_full() {
     let second = control
         .submit(reconcile_envelope(OperationId::generate(), &dir, &slow))
         .unwrap();
+    let rejected_id = OperationId::generate();
     let error = control
-        .submit(reconcile_envelope(OperationId::generate(), &dir, &slow))
+        .submit(reconcile_envelope(rejected_id, &dir, &slow))
         .unwrap_err();
     assert_eq!(error.kind, Some(CoreErrorKind::QueueFull));
     assert!(error.retryable);
+    // Admission is one critical section: a rejected enqueue leaves nothing
+    // behind for a concurrent caller to attach to, and the id stays reusable.
+    assert!(control.operation(rejected_id).is_none());
 
     first.wait().await.unwrap();
     let _ = second.wait().await;
+    control
+        .submit(reconcile_envelope(
+            rejected_id,
+            &dir,
+            &config_body(port, ""),
+        ))
+        .expect("a queue-full rejection keeps its id submittable")
+        .wait()
+        .await
+        .unwrap();
     control
         .submit(command_envelope(CoreCommand::Shutdown))
         .unwrap()
@@ -366,4 +382,124 @@ async fn a_declared_digest_mismatch_aborts_before_anything_happens() {
         .wait()
         .await
         .unwrap();
+}
+
+/// The declared digest is part of the operation's identity: correcting it
+/// describes a different claim, so re-using the id is a conflict rather than a
+/// replay of the first attempt's rejection.
+#[tokio::test]
+async fn a_corrected_declared_digest_conflicts_instead_of_attaching() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let port = common::free_port();
+    let control = control(&dir).await;
+    let spec = common::mihomo_spec(&dir, dir.join("unused.yaml"));
+    let bytes = config_body(port, "").into_bytes();
+    let id = OperationId::generate();
+    let envelope = |expected_digest: Option<String>| CoreCommandEnvelope {
+        operation_id: id,
+        command: CoreCommand::Reconcile(Box::new(ReconcileRequest {
+            core: spec.core.clone(),
+            config: ConfigInput::Inline {
+                bytes: bytes.clone(),
+                expected_digest,
+            },
+            options: spec.options.clone(),
+            expected_applied: None,
+        })),
+    };
+
+    let error = control
+        .submit(envelope(Some("0000000000000000".to_owned())))
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Some(CoreErrorKind::InvalidConfig));
+
+    let error = control
+        .submit(envelope(Some(nyanpasu_core_manager::payload_digest(
+            &bytes,
+        ))))
+        .unwrap_err();
+    assert_eq!(error.kind, Some(CoreErrorKind::OperationConflict));
+
+    control
+        .submit(command_envelope(CoreCommand::Shutdown))
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+}
+
+/// Two concurrent checks of the same bytes must not share one source file:
+/// the first to finish would delete the config the other is still using.
+#[tokio::test]
+async fn same_digest_checks_use_distinct_source_files() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let port = common::free_port();
+    let control = control(&dir).await;
+    let spec = common::mihomo_spec(&dir, dir.join("unused.yaml"));
+    let started = dir.join("check-started");
+    let body = config_body(
+        port,
+        &format!("x-fake-core:\n  check-delay-ms: 1500\n  check-started-file: '{started}'\n"),
+    );
+    let request = || CheckRequest {
+        core: spec.core.clone(),
+        config: ConfigInput::inline(body.clone().into_bytes()),
+    };
+    let sources = dir.join("sources");
+    let source_count = || {
+        std::fs::read_dir(&sources)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("check-source")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+
+    let first = tokio::spawn({
+        let control = control.clone();
+        let request = request();
+        async move { control.check(request).await }
+    });
+    wait_until(|| started.exists(), "the first check to reach its core").await;
+    let second = tokio::spawn({
+        let control = control.clone();
+        let request = request();
+        async move { control.check(request).await }
+    });
+    wait_until(
+        || source_count() == 2,
+        "both checks to own a distinct source file",
+    )
+    .await;
+
+    first.await.unwrap().expect("the first check completes");
+    second.await.unwrap().expect("the second check completes");
+    assert_eq!(source_count(), 0, "each check removes its own source file");
+
+    control
+        .submit(command_envelope(CoreCommand::Shutdown))
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+}
+
+async fn wait_until(mut condition: impl FnMut() -> bool, what: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }

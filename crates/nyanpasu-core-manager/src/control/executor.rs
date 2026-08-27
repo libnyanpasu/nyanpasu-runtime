@@ -61,7 +61,20 @@ impl Registry {
         }
     }
 
-    pub(super) fn admit(&self, id: OperationId, digest: &str) -> Result<Admission, CoreError> {
+    /// Registration and enqueue in one critical section.
+    ///
+    /// `enqueue` runs while the registry lock is held, so a concurrent submit
+    /// of the same id either does not see the entry at all or sees one that is
+    /// already queued. There is no window in which a caller can attach to a
+    /// registered operation that will never reach a terminal state — which is
+    /// why `enqueue` must be non-blocking (`try_send` / a reserved permit) and
+    /// must never call back into the registry.
+    pub(super) fn admit(
+        &self,
+        id: OperationId,
+        digest: &str,
+        enqueue: impl FnOnce() -> Result<(), mpsc::error::TrySendError<ExecutorWork>>,
+    ) -> Result<Admission, CoreError> {
         let mut inner = self.inner.lock();
         if let Some(existing) = inner.operations.get(&id) {
             if existing.digest == digest {
@@ -75,7 +88,9 @@ impl Registry {
             .with_operation(id));
         }
         // Evict the oldest *terminal* entries only. In-flight operations are
-        // never evicted; their count is already bounded by the work queue.
+        // never evicted: `CoreControl::spawn` clamps this capacity to the queue
+        // bound plus the one operation running outside the queue, so every live
+        // operation fits by construction.
         while inner.operations.len() >= self.capacity {
             let Some(position) = inner.order.iter().position(|id| {
                 inner
@@ -97,14 +112,24 @@ impl Registry {
             },
         );
         inner.order.push_back(id);
+        if let Err(error) = enqueue() {
+            inner.operations.remove(&id);
+            inner.order.pop_back();
+            let error = match error {
+                mpsc::error::TrySendError::Full(_) => CoreError::new(
+                    CoreErrorKind::QueueFull,
+                    "the operation queue is full",
+                    true,
+                ),
+                mpsc::error::TrySendError::Closed(_) => CoreError::new(
+                    CoreErrorKind::Internal,
+                    "the control executor is gone",
+                    false,
+                ),
+            };
+            return Err(error.with_operation(id));
+        }
         Ok(Admission::Registered(state_rx))
-    }
-
-    /// Rolls back a registration whose enqueue failed.
-    pub(super) fn remove(&self, id: OperationId) {
-        let mut inner = self.inner.lock();
-        inner.operations.remove(&id);
-        inner.order.retain(|entry| *entry != id);
     }
 
     pub(super) fn set(&self, id: OperationId, state: OperationState) {
