@@ -57,6 +57,26 @@ pub enum DnsError {
 
 /// Platform DNS mechanics behind one narrow boundary. A host without DNS
 /// responsibility simply injects no controller.
+///
+/// **Contract limit (audit L8).** This shape supports *structurally owned*
+/// overrides only: ones whose restore removes an artifact the controller owns
+/// and therefore does not replay `record.previous`. The orchestrator persists
+/// its pre-record before the first `apply`, and on that first call the record
+/// has no baseline yet — nothing has read one back. A write-back controller
+/// (`networksetup -setdnsservers` and friends), whose restore *is* replaying
+/// the remembered value, would be unrecoverable in exactly that window: side
+/// effect landed, `apply` never returned, nothing recorded to write back.
+///
+/// Adding one therefore requires splitting `apply` into prepare (read back the
+/// baseline, hand it to the orchestrator to persist) and commit, which is the
+/// L8 migration. Until then, do not implement this trait with a write-back
+/// mechanism.
+///
+/// Each call is bounded by
+/// [`ManagerOptions::dns_timeout`](crate::spec::ManagerOptions::dns_timeout).
+/// An implementation must therefore be cancel-safe in the weak sense the
+/// orchestrator relies on: a dropped future may leave the side effect in place,
+/// and it is treated as uncertain rather than absent.
 pub trait DnsController: Send + Sync {
     /// The override this host should hold while `effective` runs, or `None`.
     ///
@@ -117,6 +137,9 @@ pub mod macos {
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                // The orchestrator bounds this call and drops the future on
+                // timeout; without this the child would outlive it.
+                .kill_on_drop(true)
                 .spawn()?;
             child
                 .stdin

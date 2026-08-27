@@ -41,7 +41,20 @@ impl CoreManager {
             .await;
         // DNS rides the same transaction (fixed converge tail): applied while
         // the desired runtime is up, restored when nothing survived.
-        self.dns_converge(&mut ctrl).await;
+        //
+        // A rejected transaction is the exception, and only when it changed
+        // nothing: a CAS conflict or an invalid config leaves the previous
+        // runtime alive and untouched, so touching DNS would be a side effect
+        // of a refusal. A transaction that failed *and* left nothing running
+        // still converges, because that is the only place a restore can undo
+        // an override still pointing at a dead core.
+        let runtime_alive = ctrl
+            .current
+            .as_ref()
+            .is_some_and(|active| !active.instance.state().borrow().state.is_terminal());
+        if result.is_ok() || !runtime_alive {
+            self.dns_converge(&mut ctrl).await;
+        }
         result
     }
 

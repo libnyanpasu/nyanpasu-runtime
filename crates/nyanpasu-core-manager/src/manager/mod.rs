@@ -266,6 +266,7 @@ impl CoreManager {
             ("control_timeout", options.control_timeout),
             ("reconcile_timeout", options.reconcile_timeout),
             ("stop_timeout", options.stop_timeout),
+            ("dns_timeout", options.dns_timeout),
         ] {
             if timeout.is_zero() {
                 return Err(Error::InvalidManagerOptions(format!(
@@ -287,7 +288,7 @@ impl CoreManager {
             ));
         }
         let max_epoch = sweep_orphans(&store).await?;
-        dns_sync::reconcile_orphan_record(&store, dns.as_deref()).await;
+        dns_sync::reconcile_orphan_record(&store, dns.as_deref(), options.dns_timeout).await;
         let (status_tx, _) = watch::channel(CoreStatus::initial());
         let (log_tx, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
         // Subscribed here rather than inside the task, and before any instance
