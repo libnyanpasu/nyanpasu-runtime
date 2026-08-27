@@ -379,21 +379,26 @@ impl CoreControl {
         )));
         let (work_tx, work_rx) = mpsc::channel(queue_capacity);
         let (done_tx, done_rx) = watch::channel(false);
-        let context = ExecutorContext {
+        let closing = Arc::new(AtomicBool::new(false));
+        let context = Arc::new(ExecutorContext {
             manager: manager.clone(),
             registry: registry.clone(),
             source_dir: source_dir.clone(),
             working_dir: working_dir.clone(),
-        };
+            closing: closing.clone(),
+        });
         tokio::spawn(async move {
-            executor::run(work_rx, context).await;
-            let _ = done_tx.send(true);
+            // Only a clean exit reports done. A dead executor drops `done_tx`
+            // instead, which is what `until_closed` reads as `Died`.
+            if executor::run(work_rx, context).await == ExecutorExit::Clean {
+                let _ = done_tx.send(true);
+            }
         });
         Self {
             manager,
             registry,
             work_tx,
-            closing: Arc::new(AtomicBool::new(false)),
+            closing,
             check_semaphore: Arc::new(Semaphore::new(check_concurrency)),
             source_dir,
             working_dir,

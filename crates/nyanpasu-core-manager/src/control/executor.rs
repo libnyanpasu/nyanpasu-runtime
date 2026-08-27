@@ -3,7 +3,13 @@
 //! (design §10). Callers hold [`super::OperationHandle`]s; dropping one never
 //! cancels the work it names.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use camino::Utf8PathBuf;
 use tokio::sync::{mpsc, watch};
@@ -135,7 +141,13 @@ impl Registry {
     pub(super) fn set(&self, id: OperationId, state: OperationState) {
         let inner = self.inner.lock();
         if let Some(operation) = inner.operations.get(&id) {
-            let _ = operation.state_tx.send(state);
+            // `send` is not `send_replace`: with no live receiver it returns
+            // the value back as an error and leaves the stored one untouched.
+            // Every caller that drops its handle -- the wire's fire-and-forget
+            // submit, for one -- would then leave this operation `Queued`
+            // forever, and the next long-poll would subscribe to a state that
+            // stopped advancing.
+            operation.state_tx.send_replace(state);
         }
     }
 
@@ -165,20 +177,78 @@ pub(super) fn is_terminal(state: &OperationState) -> bool {
 
 pub(super) struct ExecutorContext {
     pub(super) manager: CoreManager,
-    pub(super) registry: std::sync::Arc<Registry>,
+    pub(super) registry: Arc<Registry>,
     pub(super) source_dir: Utf8PathBuf,
     pub(super) working_dir: Utf8PathBuf,
+    /// Shared with [`super::CoreControl`]: the executor is the only writer
+    /// after `shutdown` latches it, and the latch is what makes queued work
+    /// refuse rather than run behind a shutdown.
+    pub(super) closing: Arc<AtomicBool>,
 }
 
-pub(super) async fn run(mut rx: mpsc::Receiver<ExecutorWork>, context: ExecutorContext) {
+pub(super) async fn run(
+    mut rx: mpsc::Receiver<ExecutorWork>,
+    context: Arc<ExecutorContext>,
+) -> super::ExecutorExit {
     while let Some(work) = rx.recv().await {
-        context.registry.set(work.id, OperationState::Running);
-        let is_shutdown = matches!(work.command, CoreCommand::Shutdown);
-        let state = match execute(&context, work.id, work.command).await {
-            Ok(output) => OperationState::Succeeded(output),
-            Err(error) => OperationState::Failed(error),
+        let ExecutorWork { id, command } = work;
+        let is_shutdown = matches!(command, CoreCommand::Shutdown);
+        // Admission latched closing before this operation was dequeued: it was
+        // queued for a control plane that no longer accepts work, so it is
+        // refused here rather than executed behind the shutdown.
+        if !is_shutdown && context.closing.load(Ordering::Acquire) {
+            context.registry.set(
+                id,
+                OperationState::Failed(
+                    CoreError::new(
+                        CoreErrorKind::ShuttingDown,
+                        "the control plane is shutting down",
+                        false,
+                    )
+                    .with_operation(id),
+                ),
+            );
+            continue;
+        }
+        context.registry.set(id, OperationState::Running);
+        // One task per operation, so a panic inside a transaction becomes a
+        // `JoinError` here instead of unwinding the executor and leaving every
+        // in-flight and queued operation without a terminal state. The executor
+        // still awaits it, so operations stay serialized.
+        let operation_context = context.clone();
+        let outcome =
+            tokio::spawn(async move { execute(&operation_context, id, command).await }).await;
+        let state = match outcome {
+            Ok(Ok(output)) => OperationState::Succeeded(output),
+            Ok(Err(error)) => OperationState::Failed(error),
+            Err(join) => {
+                // The guard over `Ctrl` was released while unwinding, so the
+                // orchestrator's state may be half-updated. `Died` is fatal by
+                // design: the executor terminalizes what it can and stops.
+                context.registry.set(
+                    id,
+                    OperationState::Failed(
+                        CoreError::new(
+                            CoreErrorKind::Internal,
+                            format!("the control operation panicked: {join}"),
+                            false,
+                        )
+                        .with_operation(id),
+                    ),
+                );
+                context.closing.store(true, Ordering::Release);
+                // A queued Shutdown did not happen either: nothing ran it.
+                drain(&mut rx, &context, |work| {
+                    OperationState::Failed(
+                        CoreError::new(CoreErrorKind::Internal, "the control executor died", false)
+                            .with_operation(work.id),
+                    )
+                })
+                .await;
+                return super::ExecutorExit::Died;
+            }
         };
-        context.registry.set(work.id, state);
+        context.registry.set(id, state);
         if is_shutdown {
             break;
         }
@@ -186,20 +256,37 @@ pub(super) async fn run(mut rx: mpsc::Receiver<ExecutorWork>, context: ExecutorC
     // Everything still queued was admitted before the shutdown drained the
     // loop. A queued Shutdown *was* accomplished by the one that ran; anything
     // else was not.
+    drain(&mut rx, &context, |work| match work.command {
+        CoreCommand::Shutdown => OperationState::Succeeded(OperationOutput::ShutDown),
+        _ => OperationState::Failed(
+            CoreError::new(
+                CoreErrorKind::ShuttingDown,
+                "the control plane shut down before this queued operation ran",
+                false,
+            )
+            .with_operation(work.id),
+        ),
+    })
+    .await;
+    super::ExecutorExit::Clean
+}
+
+/// Closes the queue and gives every operation still in it a terminal state.
+///
+/// `recv` and not `try_recv`: closing the receiver stops new senders but leaves
+/// a permit already handed out by [`mpsc::Sender::reserve`] valid, and
+/// `try_recv` reports the buffer empty while such a permit is still in flight.
+/// Awaiting instead waits for every outstanding permit to be used or dropped,
+/// which is what makes "every admitted operation reaches a terminal state" true
+/// rather than merely usually true.
+async fn drain(
+    rx: &mut mpsc::Receiver<ExecutorWork>,
+    context: &ExecutorContext,
+    terminal: impl Fn(&ExecutorWork) -> OperationState,
+) {
     rx.close();
-    while let Ok(work) = rx.try_recv() {
-        let state = match work.command {
-            CoreCommand::Shutdown => OperationState::Succeeded(OperationOutput::ShutDown),
-            _ => OperationState::Failed(
-                CoreError::new(
-                    CoreErrorKind::ShuttingDown,
-                    "the control plane shut down before this queued operation ran",
-                    false,
-                )
-                .with_operation(work.id),
-            ),
-        };
-        context.registry.set(work.id, state);
+    while let Some(work) = rx.recv().await {
+        context.registry.set(work.id, terminal(&work));
     }
 }
 

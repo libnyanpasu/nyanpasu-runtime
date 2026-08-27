@@ -11,18 +11,28 @@ use std::sync::{
 
 use nyanpasu_core_manager::{
     ConfigInput, ControlOptions, CoreCommand, CoreCommandEnvelope, CoreControl, CoreErrorKind,
-    Error, ManagerOptions, OperationId, OperationOutput, ProbePhase, ProbeResult, ReconcileRequest,
+    Error, ManagerOptions, OperationId, OperationOutput, OperationState, ProbePhase, ProbeResult,
+    ReconcileRequest,
     manager::{ApplyOutcome, CoreManager},
     runtime::{BoxFuture, RuntimeBackend, RuntimeInstance, RuntimeLaunchRequest},
     spec::{InstanceSpec, ResolvedController},
     state::{InstanceState, InstanceStatus, StopReason},
 };
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 #[derive(Default)]
 struct FakeBackend {
     refuse_stop: Arc<AtomicBool>,
     launched_epochs: Mutex<Vec<u64>>,
+    /// Holds the first launch inside the executor so a test can fill the queue
+    /// behind a transaction that is provably running.
+    gate_launch: AtomicBool,
+    gate_taken: AtomicBool,
+    launch_started: Notify,
+    release_launch: Notify,
+    /// Injected here rather than in the control plane: the executor's panic
+    /// boundary must be provable without a production-side hook.
+    panic_on_launch: AtomicBool,
 }
 
 impl RuntimeBackend for FakeBackend {
@@ -32,6 +42,16 @@ impl RuntimeBackend for FakeBackend {
     ) -> BoxFuture<'_, Result<Box<dyn RuntimeInstance>, Error>> {
         Box::pin(async move {
             self.launched_epochs.lock().unwrap().push(request.epoch);
+            if self.gate_launch.load(Ordering::SeqCst)
+                && !self.gate_taken.swap(true, Ordering::SeqCst)
+            {
+                self.launch_started.notify_one();
+                self.release_launch.notified().await;
+            }
+            assert!(
+                !self.panic_on_launch.load(Ordering::SeqCst),
+                "injected launch panic"
+            );
             let (state_tx, _) = watch::channel(InstanceStatus {
                 state: InstanceState::Starting,
                 health: None,
@@ -266,4 +286,60 @@ async fn an_unproven_stop_quarantines_and_blocks_every_mutation() {
         .wait()
         .await
         .unwrap();
+}
+
+/// A panicking transaction used to take the executor down with it: the
+/// operation that panicked and everything queued behind it stayed `Queued` or
+/// `Running` forever, because the registry kept their watch senders alive.
+#[tokio::test]
+async fn an_executor_panic_gives_every_operation_a_terminal_state_and_reports_died() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let backend = Arc::new(FakeBackend::default());
+    backend.gate_launch.store(true, Ordering::SeqCst);
+    backend.panic_on_launch.store(true, Ordering::SeqCst);
+    let control = control_with_backend(&dir, backend.clone()).await;
+
+    let panicking = control
+        .submit(reconcile_envelope(&dir, common::fake_core_bin()))
+        .unwrap();
+    // The second operation is admitted while the first is provably inside the
+    // executor, so it is sitting in the queue when the panic happens.
+    backend.launch_started.notified().await;
+    let queued = control
+        .submit(CoreCommandEnvelope {
+            operation_id: OperationId::generate(),
+            command: CoreCommand::Stop,
+        })
+        .unwrap();
+    // Dropped on purpose: the wire's submit answers from the admission
+    // snapshot and keeps nothing, so the registry has to record the terminal
+    // state with no receiver listening. Holding the handle here would keep a
+    // `watch` receiver alive and hide exactly that.
+    let queued_id = queued.id();
+    drop(queued);
+    backend.release_launch.notify_one();
+
+    let error = panicking.wait().await.unwrap_err();
+    assert_eq!(error.kind, Some(CoreErrorKind::Internal));
+    assert!(
+        matches!(
+            control.operation(queued_id),
+            Some(OperationState::Failed(ref error)) if error.kind == Some(CoreErrorKind::Internal)
+        ),
+        "a queued operation whose handle was dropped still needs a terminal state, got {:?}",
+        control.operation(queued_id)
+    );
+    assert_eq!(
+        control.until_closed().await,
+        nyanpasu_core_manager::ExecutorExit::Died
+    );
+
+    // A dead executor admits nothing further.
+    let error = control
+        .submit(CoreCommandEnvelope {
+            operation_id: OperationId::generate(),
+            command: CoreCommand::Stop,
+        })
+        .unwrap_err();
+    assert_eq!(error.kind, Some(CoreErrorKind::ShuttingDown));
 }

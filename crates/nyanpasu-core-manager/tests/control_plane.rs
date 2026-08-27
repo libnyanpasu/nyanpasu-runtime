@@ -503,3 +503,58 @@ async fn wait_until(mut condition: impl FnMut() -> bool, what: &str) {
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
+
+/// The registry, not the caller, owns operation state. `watch::Sender::send`
+/// hands the value back as an error when nothing is subscribed and leaves the
+/// stored one untouched, so a fire-and-forget submit -- which is exactly what
+/// `POST /v2/core/submit` is -- would leave its operation `Queued` forever and
+/// every later poll would subscribe to a state that stopped advancing.
+#[tokio::test]
+async fn an_operation_whose_handle_was_dropped_still_reaches_a_terminal_state() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let control = control(&dir).await;
+
+    let handle = control
+        .submit(command_envelope(CoreCommand::Stop))
+        .expect("the stop is admitted");
+    let id = handle.id();
+    drop(handle);
+
+    wait_until(
+        || {
+            matches!(
+                control.operation(id),
+                Some(OperationState::Succeeded(_)) | Some(OperationState::Failed(_))
+            )
+        },
+        "the dropped operation to reach a terminal state",
+    )
+    .await;
+}
+
+/// The executor's drain rests on three properties of a tokio mpsc, and a
+/// change in any of them silently reopens the hole it closes: an operation
+/// admitted through a reserved permit would land in a queue nobody reads and
+/// never reach a terminal state.
+#[tokio::test]
+async fn a_closed_queue_still_delivers_an_outstanding_permit() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<u8>(4);
+    let permit = tx.reserve().await.expect("the queue is open");
+    rx.close();
+
+    // 1. `try_recv` reports the queue empty while the permit is outstanding.
+    assert!(rx.try_recv().is_err());
+
+    // 2. `recv` waits for it rather than ending the drain early.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err()
+    );
+
+    // 3. The permit still delivers into a closed queue, and only then does the
+    //    drain see the end.
+    permit.send(7);
+    assert_eq!(rx.recv().await, Some(7));
+    assert_eq!(rx.recv().await, None);
+}
