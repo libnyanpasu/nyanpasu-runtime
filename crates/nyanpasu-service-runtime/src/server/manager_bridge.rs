@@ -70,6 +70,11 @@ pub(crate) const MSG_CORE_NOT_STARTED: &str = "core have not been started yet";
 pub(crate) struct OpError {
     kind: Option<CoreErrorKind>,
     message: String,
+    /// The producer's answer, when it has one. Left `None` everywhere the
+    /// service is only classifying a failure it observed: the kind's default
+    /// is the client's fallback, and repeating it here would turn a guess into
+    /// an assertion on the wire.
+    retryable: Option<bool>,
 }
 
 impl OpError {
@@ -79,6 +84,7 @@ impl OpError {
         Self {
             kind: None,
             message: message.into(),
+            retryable: None,
         }
     }
 
@@ -88,7 +94,15 @@ impl OpError {
         Self {
             kind: Some(kind),
             message: message.into(),
+            retryable: None,
         }
+    }
+
+    /// Pins retryability the control plane already decided, rather than leaving
+    /// the client to infer it from the kind.
+    fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
+        self
     }
 
     /// The error envelope for this failure, `error_kind` included.
@@ -96,7 +110,7 @@ impl OpError {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug,
     {
-        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind)
+        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind, self.retryable)
     }
 }
 
@@ -104,6 +118,7 @@ impl From<ManagerError> for OpError {
     fn from(error: ManagerError) -> Self {
         Self {
             kind: error.kind(),
+            retryable: None,
             message: match &error {
                 // The legacy wire string the GUI already branches on, so
                 // `apply` on a stopped core reads exactly like `restart` on
@@ -803,10 +818,12 @@ fn echo_commits(state: &OperationState) -> bool {
 }
 
 fn op_error_from_control(error: ControlError) -> OpError {
+    let retryable = error.retryable;
     match error.kind {
         Some(kind) => OpError::with_kind(kind, error.message),
         None => OpError::plain(error.message),
     }
+    .retryable(retryable)
 }
 
 fn map_operation(id: OperationId, state: OperationState) -> OperationInfo {

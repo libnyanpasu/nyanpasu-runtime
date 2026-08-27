@@ -267,7 +267,7 @@ impl CoreError {
         Self {
             kind,
             message: error.to_string(),
-            retryable: kind.is_some_and(default_retryable),
+            retryable: kind.is_some_and(|kind| kind.default_retryable()),
             operation_id,
         }
     }
@@ -288,16 +288,6 @@ impl std::fmt::Display for CoreError {
 }
 
 impl std::error::Error for CoreError {}
-
-/// Kinds that are retryable regardless of the situation that produced them.
-/// Everything else defaults to non-retryable and the producer overrides where
-/// it knows better.
-fn default_retryable(kind: CoreErrorKind) -> bool {
-    matches!(
-        kind,
-        CoreErrorKind::QueueFull | CoreErrorKind::BackendUnavailable
-    )
-}
 
 /// Registry-visible lifecycle of one operation (design §9.4).
 #[derive(Debug, Clone)]
@@ -766,9 +756,9 @@ mod tests {
     #[test]
     fn admission_kinds_default_to_retryable() {
         assert!(CoreError::new(CoreErrorKind::QueueFull, "full", true).retryable);
-        assert!(default_retryable(CoreErrorKind::QueueFull));
-        assert!(default_retryable(CoreErrorKind::BackendUnavailable));
-        assert!(!default_retryable(CoreErrorKind::OperationConflict));
-        assert!(!default_retryable(CoreErrorKind::ShuttingDown));
+        assert!(CoreErrorKind::QueueFull.default_retryable());
+        assert!(CoreErrorKind::BackendUnavailable.default_retryable());
+        assert!(!CoreErrorKind::OperationConflict.default_retryable());
+        assert!(!CoreErrorKind::ShuttingDown.default_retryable());
     }
 }

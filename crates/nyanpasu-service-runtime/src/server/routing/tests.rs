@@ -620,6 +620,9 @@ async fn v2_submit_reuses_of_an_id_with_a_different_payload_conflict() {
     let second: CoreSubmitRes<'static> = body_of(response).await;
     assert_eq!(second.code, ResponseCode::OtherError);
     assert_eq!(second.error_kind.as_deref(), Some("operation_conflict"));
+    // Retrying a conflict re-submits the same losing payload, so the answer is
+    // an explicit `false` rather than an absent field the caller has to guess at.
+    assert_eq!(second.retryable, Some(false));
 }
 
 /// A malformed id and an unknown id both come back as error envelopes, and
@@ -705,4 +708,5 @@ async fn shutdown_closes_the_v2_control_plane_to_new_work() {
     let envelope: CoreSubmitRes<'static> = body_of(response).await;
     assert_eq!(envelope.code, ResponseCode::OtherError);
     assert_eq!(envelope.error_kind.as_deref(), Some("shutting_down"));
+    assert_eq!(envelope.retryable, Some(false));
 }

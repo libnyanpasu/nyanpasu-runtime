@@ -55,6 +55,13 @@ pub struct R<'a, T: Serialize + DeserializeOwned + Debug> {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<Cow<'a, str>>,
+    /// Whether retrying the same request could succeed. Absent means the
+    /// service did not say — never "no": a caller that needs a decision here
+    /// must fall back to [`CoreErrorKind::default_retryable`], because an older
+    /// service omits the field entirely.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 impl<T: Serialize + DeserializeOwned + Debug> R<'_, T> {
@@ -100,6 +107,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             data: None,
             ts: crate::utils::get_current_ts(),
             error_kind: None,
+            retryable: None,
         }
     }
 
@@ -108,8 +116,13 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
     /// `kind` is `Option` because a failure the service cannot classify must
     /// still be reportable — guessing a kind is worse than omitting it. Taking
     /// the enum rather than a string is what keeps a hand-typed kind off the
-    /// wire.
-    pub fn other_error_with_kind(msg: Cow<'a, str>, kind: Option<CoreErrorKind>) -> R<'a, T> {
+    /// wire. `retryable` is `Option` for the same reason, and is the producer's
+    /// answer rather than the kind's default when both exist.
+    pub fn other_error_with_kind(
+        msg: Cow<'a, str>,
+        kind: Option<CoreErrorKind>,
+        retryable: Option<bool>,
+    ) -> R<'a, T> {
         let code = ResponseCode::OtherError;
         R {
             code,
@@ -117,6 +130,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             data: None,
             ts: crate::utils::get_current_ts(),
             error_kind: kind.map(|kind| Cow::Borrowed(kind.as_str())),
+            retryable,
         }
     }
 
@@ -128,6 +142,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             data: Some(data),
             ts: crate::utils::get_current_ts(),
             error_kind: None,
+            retryable: None,
         }
     }
 }

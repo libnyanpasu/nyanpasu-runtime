@@ -101,6 +101,14 @@ impl CoreErrorKind {
         }
     }
 
+    /// Whether a failure of this kind is retryable regardless of what produced
+    /// it. Everything else defaults to non-retryable and the producer overrides
+    /// where it knows better, which is why this is a default and not the
+    /// answer: the retryability that reaches the wire is the producer's.
+    pub const fn default_retryable(&self) -> bool {
+        matches!(self, Self::QueueFull | Self::BackendUnavailable)
+    }
+
     /// The kind a wire string names, or `None` when this build does not know it.
     ///
     /// `None` is not an error: a newer service may classify a failure this build

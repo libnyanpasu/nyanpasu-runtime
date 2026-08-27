@@ -51,6 +51,10 @@ pub enum ClientError {
         /// The envelope's `error_kind`, when the service classified the
         /// failure. See [`crate::api::CoreErrorKind`].
         error_kind: Option<String>,
+        /// The envelope's `retryable`, when the service answered. `None` also
+        /// covers every service too old to carry the field, so it must not be
+        /// read as "do not retry"; see [`ClientError::retryable`].
+        retryable: Option<bool>,
     },
     #[error("IPC request `{operation}` succeeded but carried no data")]
     EmptyData { operation: &'static str },
@@ -77,6 +81,21 @@ impl ClientError {
                 error_kind.as_deref().and_then(CoreErrorKind::from_wire)
             }
             _ => None,
+        }
+    }
+
+    /// Whether retrying this request could succeed.
+    ///
+    /// The service's own answer wins; when it did not give one — an older
+    /// build, or an unclassified failure — the kind's default stands in, and a
+    /// failure with neither is not retryable.
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Server { retryable, .. } => retryable.unwrap_or_else(|| {
+                self.core_error_kind()
+                    .is_some_and(|kind| kind.default_retryable())
+            }),
+            _ => false,
         }
     }
 }
@@ -159,6 +178,7 @@ impl Client {
                 code: envelope.code,
                 msg: envelope.msg.into_owned(),
                 error_kind: envelope.error_kind.map(|kind| kind.into_owned()),
+                retryable: envelope.retryable,
             });
         }
         let body =
@@ -204,6 +224,7 @@ impl Client {
                 code: envelope.code,
                 msg: envelope.msg.into_owned(),
                 error_kind: envelope.error_kind.map(|kind| kind.into_owned()),
+                retryable: envelope.retryable,
             });
         }
         Ok(envelope)
@@ -220,6 +241,7 @@ mod tests {
             operation: "/core/apply",
             code: ResponseCode::OtherError,
             msg: "boom".into(),
+            retryable: None,
             error_kind: Some("revision_conflict".into()),
         };
         assert_eq!(
@@ -228,12 +250,28 @@ mod tests {
         );
     }
 
+    /// The kind's default is a fallback for services that did not answer, not
+    /// a rule that overrides one that did.
+    #[test]
+    fn the_services_own_retryability_wins_over_the_kind_default() {
+        let server = |retryable| ClientError::Server {
+            operation: "/core/v2/submit",
+            code: ResponseCode::OtherError,
+            msg: "boom".into(),
+            retryable,
+            error_kind: Some("backend_unavailable".into()),
+        };
+        assert!(server(None).retryable());
+        assert!(!server(Some(false)).retryable());
+    }
+
     #[test]
     fn an_unknown_kind_keeps_its_raw_string() {
         let error = ClientError::Server {
             operation: "/core/apply",
             code: ResponseCode::OtherError,
             msg: "boom".into(),
+            retryable: None,
             error_kind: Some("a_future_kind".into()),
         };
         assert!(error.core_error_kind().is_none());
