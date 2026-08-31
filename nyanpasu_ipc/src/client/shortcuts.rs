@@ -9,15 +9,11 @@ use reqwest_websocket::{Message, Upgrade};
 use crate::api::{
     self,
     contract::{
-        CoreApply, CoreCheck, CoreRecover, CoreRestart, CoreStart, CoreStop, CoreV2Operation,
-        CoreV2Status, CoreV2Submit, LogsInspect, LogsRetrieve, NetworkSetDns, Status,
+        CoreCheck, CoreRecover, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status,
+        CoreV2Submit, LogsInspect, LogsRetrieve, NetworkSetDns, Status,
     },
-    core::{
-        apply::{CORE_APPLY_ENDPOINT, CoreApplyData},
-        v2::{
-            CORE_V2_OPERATION_ENDPOINT, CORE_V2_STATUS_ENDPOINT, CORE_V2_SUBMIT_ENDPOINT,
-            OperationInfo,
-        },
+    core::v2::{
+        CORE_V2_OPERATION_ENDPOINT, CORE_V2_STATUS_ENDPOINT, CORE_V2_SUBMIT_ENDPOINT, OperationInfo,
     },
     log::{LOGS_INSPECT_ENDPOINT, LOGS_RETRIEVE_ENDPOINT},
     status::STATUS_ENDPOINT,
@@ -48,22 +44,6 @@ impl Client {
 
     pub async fn restart_core(&self) -> Result<()> {
         self.call::<CoreRestart>(None).await.map(|_| ())
-    }
-
-    /// Apply a config to the running core. See
-    /// [`CoreApplyData::outcome`](api::core::apply::CoreApplyData::outcome):
-    /// `rolled_back` is a successful call reporting that the **old** config is
-    /// what runs.
-    pub async fn apply_config(
-        &self,
-        payload: &api::core::apply::CoreApplyReq<'_>,
-    ) -> Result<CoreApplyData> {
-        self.call::<CoreApply>(Some(payload))
-            .await?
-            .data
-            .ok_or(ClientError::EmptyData {
-                operation: CORE_APPLY_ENDPOINT,
-            })
     }
 
     /// Dry-run a config against a core binary without touching the running one.

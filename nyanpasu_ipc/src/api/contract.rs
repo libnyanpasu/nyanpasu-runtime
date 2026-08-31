@@ -21,7 +21,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::{
     R,
     core::{
-        apply::{CORE_APPLY_ENDPOINT, CoreApplyData},
         check::CORE_CHECK_ENDPOINT,
         recover::CORE_RECOVER_ENDPOINT,
         restart::CORE_RESTART_ENDPOINT,
@@ -91,16 +90,6 @@ impl IpcOperation for CoreRestart {
     const PATH: &'static str = CORE_RESTART_ENDPOINT;
     type Req<'a> = ();
     type Data = ();
-}
-
-/// `POST /core/apply`
-pub struct CoreApply;
-
-impl IpcOperation for CoreApply {
-    const METHOD: Method = Method::POST;
-    const PATH: &'static str = CORE_APPLY_ENDPOINT;
-    type Req<'a> = super::core::apply::CoreApplyReq<'a>;
-    type Data = CoreApplyData;
 }
 
 /// `POST /core/check`
@@ -240,10 +229,6 @@ mod tests {
     /// behaviour, but for the same reason: a path typo is a protocol break.
     #[test]
     fn every_s8_operation_is_addressed_as_the_report_says() {
-        assert_eq!(
-            (CoreApply::METHOD, CoreApply::PATH),
-            (Method::POST, "/core/apply")
-        );
         assert_eq!(
             (CoreCheck::METHOD, CoreCheck::PATH),
             (Method::POST, "/core/check")
