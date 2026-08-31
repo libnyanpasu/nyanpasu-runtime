@@ -15,8 +15,8 @@ use nyanpasu_core_manager::LocalIpcPolicy;
 use nyanpasu_ipc::api::{
     ResponseCode,
     contract::{
-        CoreCheck, CoreStart, CoreStop, IpcOperation, LogsInspect, LogsRetrieve, NetworkSetDns,
-        Status as StatusOp,
+        CoreCheck, CoreStart, CoreStop, CoreV2Operation, CoreV2Status, CoreV2Submit, IpcOperation,
+        LogsInspect, LogsRetrieve, NetworkSetDns, Status as StatusOp,
     },
     core::{
         check::{CoreCheckReq, CoreCheckRes},
@@ -203,6 +203,9 @@ async fn every_operation_is_mounted_where_its_contract_says() {
         (CoreStart::METHOD, CoreStart::PATH),
         (CoreStop::METHOD, CoreStop::PATH),
         (CoreCheck::METHOD, CoreCheck::PATH),
+        (CoreV2Submit::METHOD, CoreV2Submit::PATH),
+        (CoreV2Operation::METHOD, CoreV2Operation::PATH),
+        (CoreV2Status::METHOD, CoreV2Status::PATH),
         (LogsRetrieve::METHOD, LogsRetrieve::PATH),
         (LogsInspect::METHOD, LogsInspect::PATH),
         (NetworkSetDns::METHOD, NetworkSetDns::PATH),

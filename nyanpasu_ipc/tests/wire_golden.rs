@@ -684,8 +684,9 @@ fn a_pre_s7_status_payload_still_decodes() {
 }
 
 #[test]
-fn the_apply_outcome_kinds_are_pinned() {
+fn the_reconcile_outcome_kinds_are_pinned() {
     for (value, expected) in [
+        (ReconcileOutcomeKind::Started, r#""started""#),
         (ReconcileOutcomeKind::Noop, r#""noop""#),
         (ReconcileOutcomeKind::Patched, r#""patched""#),
         (ReconcileOutcomeKind::Reloaded, r#""reloaded""#),
