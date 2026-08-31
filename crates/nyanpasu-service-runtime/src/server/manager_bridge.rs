@@ -323,18 +323,6 @@ impl CoreManagerService {
         }
     }
 
-    pub async fn restart(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control_state.lock().await;
-        if control.closing {
-            anyhow::bail!("service is shutting down");
-        }
-        match self.inner.manager.restart().await {
-            Ok(_outcome) => Ok(()),
-            Err(ManagerError::NotStarted) => anyhow::bail!(MSG_CORE_NOT_STARTED),
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Dry-run a config against a core binary. Never touches the running core.
     #[instrument(skip(self, infos))]
     pub async fn check(

@@ -41,7 +41,6 @@ use nyanpasu_ipc::{
     api::{
         CoreErrorKind, RBuilder, ResponseCode,
         core::{
-            restart::{CORE_RESTART_ENDPOINT, CoreRestartRes},
             start::{CORE_START_ENDPOINT, CoreStartReq, CoreStartRes},
             stop::{CORE_STOP_ENDPOINT, CoreStopRes},
             v2::{
@@ -190,7 +189,6 @@ async fn run_server(
 struct Received {
     start_core: Option<(CoreType, PathBuf)>,
     stop_core_calls: usize,
-    restart_core_calls: usize,
     set_dns_calls: Vec<Option<Vec<IpAddr>>>,
 }
 
@@ -267,13 +265,6 @@ async fn capture_start_core_handler(
         content_type: headers.get(CONTENT_TYPE).cloned(),
         body,
     });
-    (StatusCode::OK, Json(RBuilder::success(())))
-}
-
-async fn restart_core_handler(
-    State(state): State<Shared>,
-) -> (StatusCode, Json<CoreRestartRes<'static>>) {
-    state.lock().unwrap().restart_core_calls += 1;
     (StatusCode::OK, Json(RBuilder::success(())))
 }
 
@@ -424,7 +415,6 @@ fn test_router(state: Shared) -> Router {
         .route(STATUS_ENDPOINT, get(status_handler))
         .route(CORE_START_ENDPOINT, post(start_core_handler))
         .route(CORE_STOP_ENDPOINT, post(stop_core_handler))
-        .route(CORE_RESTART_ENDPOINT, post(restart_core_handler))
         .route(LOGS_INSPECT_ENDPOINT, get(inspect_logs_handler))
         .route(LOGS_RETRIEVE_ENDPOINT, get(retrieve_logs_handler))
         .route(NETWORK_SET_DNS_ENDPOINT, post(set_dns_handler))
@@ -466,10 +456,6 @@ async fn rest_roundtrip() {
         .await
         .expect("start_core should succeed");
     client.stop_core().await.expect("stop_core should succeed");
-    client
-        .restart_core()
-        .await
-        .expect("restart_core should succeed");
 
     let inspect = client.inspect_logs().await.expect("inspect_logs");
     assert_eq!(
@@ -514,7 +500,6 @@ async fn rest_roundtrip() {
         ))
     );
     assert_eq!(received.stop_core_calls, 1);
-    assert_eq!(received.restart_core_calls, 1);
     assert_eq!(received.set_dns_calls, [Some(servers.to_vec()), None]);
 
     let _ = shutdown.send(());

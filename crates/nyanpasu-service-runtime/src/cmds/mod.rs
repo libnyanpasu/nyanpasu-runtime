@@ -329,7 +329,6 @@ mod tests {
             "config.yaml",
         ],
         &["nyanpasu-service", "rpc", "stop-core"],
-        &["nyanpasu-service", "rpc", "restart-core"],
         &["nyanpasu-service", "rpc", "inspect-logs"],
         &["nyanpasu-service", "rpc", "set-dns"],
         &["nyanpasu-service", "rpc", "set-dns", "1.1.1.1", "8.8.8.8"],

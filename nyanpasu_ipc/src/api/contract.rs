@@ -22,7 +22,6 @@ use super::{
     R,
     core::{
         check::CORE_CHECK_ENDPOINT,
-        restart::CORE_RESTART_ENDPOINT,
         start::CORE_START_ENDPOINT,
         stop::CORE_STOP_ENDPOINT,
         v2::{
@@ -77,16 +76,6 @@ pub struct CoreStop;
 impl IpcOperation for CoreStop {
     const METHOD: Method = Method::POST;
     const PATH: &'static str = CORE_STOP_ENDPOINT;
-    type Req<'a> = ();
-    type Data = ();
-}
-
-/// `POST /core/restart`
-pub struct CoreRestart;
-
-impl IpcOperation for CoreRestart {
-    const METHOD: Method = Method::POST;
-    const PATH: &'static str = CORE_RESTART_ENDPOINT;
     type Req<'a> = ();
     type Data = ();
 }
@@ -178,10 +167,6 @@ mod tests {
         assert_eq!(
             (CoreStop::METHOD, CoreStop::PATH),
             (Method::POST, "/core/stop")
-        );
-        assert_eq!(
-            (CoreRestart::METHOD, CoreRestart::PATH),
-            (Method::POST, "/core/restart")
         );
         assert_eq!(
             (LogsRetrieve::METHOD, LogsRetrieve::PATH),

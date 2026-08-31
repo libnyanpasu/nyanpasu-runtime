@@ -97,8 +97,6 @@ pub enum RpcCommand {
     },
     /// Stop the running core
     StopCore,
-    /// Restart the running core
-    RestartCore,
     /// Dry-run a config against a core binary without touching the running core
     CheckConfig {
         /// The core type to check the config against
@@ -138,13 +136,6 @@ pub async fn rpc(commands: RpcCommand) -> Result<(), crate::cmds::CommandError> 
             let client = Client::service_default();
             client
                 .stop_core()
-                .await
-                .map_err(|e| crate::cmds::CommandError::Other(e.into()))?;
-        }
-        RpcCommand::RestartCore => {
-            let client = Client::service_default();
-            client
-                .restart_core()
                 .await
                 .map_err(|e| crate::cmds::CommandError::Other(e.into()))?;
         }

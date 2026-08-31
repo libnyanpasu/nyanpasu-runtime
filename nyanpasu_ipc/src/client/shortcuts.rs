@@ -9,8 +9,8 @@ use reqwest_websocket::{Message, Upgrade};
 use crate::api::{
     self,
     contract::{
-        CoreCheck, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status, CoreV2Submit,
-        LogsInspect, LogsRetrieve, NetworkSetDns, Status,
+        CoreCheck, CoreStart, CoreStop, CoreV2Operation, CoreV2Status, CoreV2Submit, LogsInspect,
+        LogsRetrieve, NetworkSetDns, Status,
     },
     core::v2::{
         CORE_V2_OPERATION_ENDPOINT, CORE_V2_STATUS_ENDPOINT, CORE_V2_SUBMIT_ENDPOINT, OperationInfo,
@@ -40,10 +40,6 @@ impl Client {
 
     pub async fn stop_core(&self) -> Result<()> {
         self.call::<CoreStop>(None).await.map(|_| ())
-    }
-
-    pub async fn restart_core(&self) -> Result<()> {
-        self.call::<CoreRestart>(None).await.map(|_| ())
     }
 
     /// Dry-run a config against a core binary without touching the running one.

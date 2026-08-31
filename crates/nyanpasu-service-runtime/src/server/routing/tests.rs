@@ -15,8 +15,8 @@ use nyanpasu_core_manager::LocalIpcPolicy;
 use nyanpasu_ipc::api::{
     ResponseCode,
     contract::{
-        CoreCheck, CoreRestart, CoreStart, CoreStop, IpcOperation, LogsInspect, LogsRetrieve,
-        NetworkSetDns, Status as StatusOp,
+        CoreCheck, CoreStart, CoreStop, IpcOperation, LogsInspect, LogsRetrieve, NetworkSetDns,
+        Status as StatusOp,
     },
     core::{
         check::{CoreCheckReq, CoreCheckRes},
@@ -134,27 +134,6 @@ async fn stopping_an_idle_core_keeps_the_legacy_error_envelope() {
 }
 
 #[tokio::test]
-async fn restart_before_any_start_reports_the_legacy_error() {
-    let env = TestEnv::new().await;
-    let response = create_router(env.state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(CoreRestart::PATH)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let envelope: CoreStopRes<'static> = body_of(response).await;
-    assert_eq!(envelope.code, ResponseCode::OtherError);
-    assert_eq!(envelope.msg, "core have not been started yet");
-    assert!(envelope.data.is_none());
-}
-
-#[tokio::test]
 async fn two_states_are_independent() {
     let first = TestEnv::new().await;
     let second = TestEnv::new().await;
@@ -223,7 +202,6 @@ async fn every_operation_is_mounted_where_its_contract_says() {
         (StatusOp::METHOD, StatusOp::PATH),
         (CoreStart::METHOD, CoreStart::PATH),
         (CoreStop::METHOD, CoreStop::PATH),
-        (CoreRestart::METHOD, CoreRestart::PATH),
         (CoreCheck::METHOD, CoreCheck::PATH),
         (LogsRetrieve::METHOD, LogsRetrieve::PATH),
         (LogsInspect::METHOD, LogsInspect::PATH),
