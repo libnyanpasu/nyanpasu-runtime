@@ -9,8 +9,8 @@ use reqwest_websocket::{Message, Upgrade};
 use crate::api::{
     self,
     contract::{
-        CoreCheck, CoreRecover, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status,
-        CoreV2Submit, LogsInspect, LogsRetrieve, NetworkSetDns, Status,
+        CoreCheck, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status, CoreV2Submit,
+        LogsInspect, LogsRetrieve, NetworkSetDns, Status,
     },
     core::v2::{
         CORE_V2_OPERATION_ENDPOINT, CORE_V2_STATUS_ENDPOINT, CORE_V2_SUBMIT_ENDPOINT, OperationInfo,
@@ -86,11 +86,6 @@ impl Client {
             .ok_or(ClientError::EmptyData {
                 operation: CORE_V2_STATUS_ENDPOINT,
             })
-    }
-
-    /// Clear the manager's quarantine latch. Idempotent.
-    pub async fn recover_core(&self) -> Result<()> {
-        self.call::<CoreRecover>(None).await.map(|_| ())
     }
 
     pub async fn inspect_logs(&self) -> Result<api::log::LogsResBody<'static>> {

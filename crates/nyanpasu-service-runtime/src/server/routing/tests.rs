@@ -15,12 +15,11 @@ use nyanpasu_core_manager::LocalIpcPolicy;
 use nyanpasu_ipc::api::{
     ResponseCode,
     contract::{
-        CoreCheck, CoreRecover, CoreRestart, CoreStart, CoreStop, IpcOperation, LogsInspect,
-        LogsRetrieve, NetworkSetDns, Status as StatusOp,
+        CoreCheck, CoreRestart, CoreStart, CoreStop, IpcOperation, LogsInspect, LogsRetrieve,
+        NetworkSetDns, Status as StatusOp,
     },
     core::{
         check::{CoreCheckReq, CoreCheckRes},
-        recover::CoreRecoverRes,
         stop::{CORE_STOP_ENDPOINT, CoreStopRes},
     },
     status::{CoreState, CoreStateDetail, STATUS_ENDPOINT, StatusRes},
@@ -226,7 +225,6 @@ async fn every_operation_is_mounted_where_its_contract_says() {
         (CoreStop::METHOD, CoreStop::PATH),
         (CoreRestart::METHOD, CoreRestart::PATH),
         (CoreCheck::METHOD, CoreCheck::PATH),
-        (CoreRecover::METHOD, CoreRecover::PATH),
         (LogsRetrieve::METHOD, LogsRetrieve::PATH),
         (LogsInspect::METHOD, LogsInspect::PATH),
         (NetworkSetDns::METHOD, NetworkSetDns::PATH),
@@ -432,23 +430,41 @@ async fn applying_without_a_core_binary_reports_binary_not_found() {
 /// makes it safe for a client to call before retrying an operation.
 #[tokio::test]
 async fn recovering_without_a_quarantine_succeeds() {
+    use nyanpasu_ipc::api::core::v2::{
+        CORE_V2_OPERATION_ENDPOINT, CORE_V2_SUBMIT_ENDPOINT, CoreCommandInfo, CoreOperationReq,
+        CoreOperationRes, CoreSubmitReq, CoreSubmitRes, OperationOutputInfo, OperationPhase,
+    };
     let env = TestEnv::new().await;
-    let response = create_router(env.state.clone())
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri(CoreRecover::PATH)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let id = "2031425364758697-a8b9cadb-ecfd0e1f";
+    let response = post_json(
+        env.state.clone(),
+        CORE_V2_SUBMIT_ENDPOINT,
+        &CoreSubmitReq {
+            operation_id: Cow::Borrowed(id),
+            command: CoreCommandInfo::Recover,
+        },
+    )
+    .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let envelope: CoreRecoverRes<'static> = body_of(response).await;
+    let envelope: CoreSubmitRes<'static> = body_of(response).await;
     assert_eq!(envelope.code, ResponseCode::Ok);
-    assert!(envelope.error_kind.is_none());
-    assert!(envelope.data.is_none());
+
+    let response = post_json(
+        env.state.clone(),
+        CORE_V2_OPERATION_ENDPOINT,
+        &CoreOperationReq {
+            operation_id: Cow::Borrowed(id),
+            wait_ms: Some(5_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let envelope: CoreOperationRes<'static> = body_of(response).await;
+    let info = envelope.data.expect("query returns the operation");
+    assert_eq!(info.phase, OperationPhase::Succeeded);
+    assert_eq!(info.output, Some(OperationOutputInfo::Recovered));
+    assert!(info.error.is_none());
 }
 
 /// The query string is not protocol: `/ws/events` takes no parameters and must

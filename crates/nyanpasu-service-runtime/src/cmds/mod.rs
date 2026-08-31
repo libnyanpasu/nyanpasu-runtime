@@ -367,7 +367,6 @@ mod tests {
             "--config-file",
             "config.yaml",
         ],
-        &["nyanpasu-service", "rpc", "recover-core"],
         // The exact argv `install` writes after S10.
         &[
             "nyanpasu-service",

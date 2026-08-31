@@ -110,8 +110,6 @@ pub enum RpcCommand {
         #[clap(long)]
         config_file: std::path::PathBuf,
     },
-    /// Clear the manager's quarantine latch
-    RecoverCore,
     /// Get the logs of the service
     InspectLogs,
     /// Set the dns servers
@@ -161,13 +159,6 @@ pub async fn rpc(commands: RpcCommand) -> Result<(), crate::cmds::CommandError> 
             };
             client
                 .check_config(&payload)
-                .await
-                .map_err(|e| crate::cmds::CommandError::Other(e.into()))?;
-        }
-        RpcCommand::RecoverCore => {
-            let client = Client::service_default();
-            client
-                .recover_core()
                 .await
                 .map_err(|e| crate::cmds::CommandError::Other(e.into()))?;
         }

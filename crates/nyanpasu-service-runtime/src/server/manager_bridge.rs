@@ -366,18 +366,6 @@ impl CoreManagerService {
         Ok(())
     }
 
-    /// Clear the quarantine latch left by an epoch whose death could not be
-    /// confirmed. Idempotent: succeeds when nothing was quarantined.
-    #[instrument(skip(self))]
-    pub async fn recover(&self) -> Result<(), OpError> {
-        let control = self.inner.control_state.lock().await;
-        if control.closing {
-            return Err(OpError::plain("service is shutting down"));
-        }
-        self.inner.manager.recover_quarantine().await?;
-        Ok(())
-    }
-
     pub async fn status(&self) -> CoreInfos {
         project_core_infos(
             &self.inner.manager.status(),

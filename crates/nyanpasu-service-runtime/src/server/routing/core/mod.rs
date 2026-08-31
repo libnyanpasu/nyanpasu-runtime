@@ -1,8 +1,7 @@
 use axum::Router;
 use nyanpasu_ipc::{
     api::contract::{
-        CoreCheck, CoreRecover, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status,
-        CoreV2Submit,
+        CoreCheck, CoreRestart, CoreStart, CoreStop, CoreV2Operation, CoreV2Status, CoreV2Submit,
     },
     server::RegisterOperation,
 };
@@ -10,7 +9,6 @@ use nyanpasu_ipc::{
 use super::AppState;
 
 pub mod check;
-pub mod recover;
 pub mod restart;
 pub mod start;
 pub mod stop;
@@ -22,7 +20,6 @@ pub fn setup() -> Router<AppState> {
         .register(CoreStop, stop::stop)
         .register(CoreRestart, restart::restart)
         .register(CoreCheck, check::check)
-        .register(CoreRecover, recover::recover)
         .register(CoreV2Submit, v2::submit)
         .register(CoreV2Operation, v2::operation)
         .register(CoreV2Status, v2::status)

@@ -22,7 +22,6 @@ use super::{
     R,
     core::{
         check::CORE_CHECK_ENDPOINT,
-        recover::CORE_RECOVER_ENDPOINT,
         restart::CORE_RESTART_ENDPOINT,
         start::CORE_START_ENDPOINT,
         stop::CORE_STOP_ENDPOINT,
@@ -99,16 +98,6 @@ impl IpcOperation for CoreCheck {
     const METHOD: Method = Method::POST;
     const PATH: &'static str = CORE_CHECK_ENDPOINT;
     type Req<'a> = super::core::check::CoreCheckReq<'a>;
-    type Data = ();
-}
-
-/// `POST /core/recover`
-pub struct CoreRecover;
-
-impl IpcOperation for CoreRecover {
-    const METHOD: Method = Method::POST;
-    const PATH: &'static str = CORE_RECOVER_ENDPOINT;
-    type Req<'a> = ();
     type Data = ();
 }
 
@@ -206,6 +195,10 @@ mod tests {
             (NetworkSetDns::METHOD, NetworkSetDns::PATH),
             (Method::POST, "/network/set_dns")
         );
+        assert_eq!(
+            (CoreCheck::METHOD, CoreCheck::PATH),
+            (Method::POST, "/core/check")
+        );
     }
 
     /// The v2 control-plane endpoints, pinned for the same reason.
@@ -222,20 +215,6 @@ mod tests {
         assert_eq!(
             (CoreV2Status::METHOD, CoreV2Status::PATH),
             (Method::GET, "/v2/core/status")
-        );
-    }
-
-    /// The S8 additions pin the report's addresses rather than legacy
-    /// behaviour, but for the same reason: a path typo is a protocol break.
-    #[test]
-    fn every_s8_operation_is_addressed_as_the_report_says() {
-        assert_eq!(
-            (CoreCheck::METHOD, CoreCheck::PATH),
-            (Method::POST, "/core/check")
-        );
-        assert_eq!(
-            (CoreRecover::METHOD, CoreRecover::PATH),
-            (Method::POST, "/core/recover")
         );
     }
 }
