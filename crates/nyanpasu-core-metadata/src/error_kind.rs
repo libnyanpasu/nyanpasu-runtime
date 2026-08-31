@@ -36,6 +36,20 @@ pub enum CoreErrorKind {
     ApplyRollbackFailed,
     /// A core process could not be proven dead; the manager is now quarantined.
     StopUnconfirmed,
+    /// The control plane is shutting down and admits no new operations.
+    ShuttingDown,
+    /// The bounded operation queue is full; retry after in-flight work drains.
+    QueueFull,
+    /// The `OperationId` was already used with a different payload, or the
+    /// operation cannot run concurrently with one that owns the endpoint
+    /// (for example a host handoff in progress).
+    OperationConflict,
+    /// The control endpoint cannot be reached: transport failure, daemon not
+    /// running, or the endpoint is reconnecting. Retryable by definition.
+    BackendUnavailable,
+    /// The control plane itself failed — an executor died or a reply channel
+    /// broke. Not retryable; the host must treat this as fatal.
+    Internal,
 }
 
 impl CoreErrorKind {
@@ -55,6 +69,11 @@ impl CoreErrorKind {
         Self::ApplyFailed,
         Self::ApplyRollbackFailed,
         Self::StopUnconfirmed,
+        Self::ShuttingDown,
+        Self::QueueFull,
+        Self::OperationConflict,
+        Self::BackendUnavailable,
+        Self::Internal,
     ];
 
     /// The wire string. `serde` derives the same spelling from
@@ -74,7 +93,20 @@ impl CoreErrorKind {
             Self::ApplyFailed => "apply_failed",
             Self::ApplyRollbackFailed => "apply_rollback_failed",
             Self::StopUnconfirmed => "stop_unconfirmed",
+            Self::ShuttingDown => "shutting_down",
+            Self::QueueFull => "queue_full",
+            Self::OperationConflict => "operation_conflict",
+            Self::BackendUnavailable => "backend_unavailable",
+            Self::Internal => "internal",
         }
+    }
+
+    /// Whether a failure of this kind is retryable regardless of what produced
+    /// it. Everything else defaults to non-retryable and the producer overrides
+    /// where it knows better, which is why this is a default and not the
+    /// answer: the retryability that reaches the wire is the producer's.
+    pub const fn default_retryable(&self) -> bool {
+        matches!(self, Self::QueueFull | Self::BackendUnavailable)
     }
 
     /// The kind a wire string names, or `None` when this build does not know it.
@@ -132,6 +164,17 @@ mod tests {
             "apply_rollback_failed"
         );
         assert_eq!(CoreErrorKind::StopUnconfirmed.as_str(), "stop_unconfirmed");
+        assert_eq!(CoreErrorKind::ShuttingDown.as_str(), "shutting_down");
+        assert_eq!(CoreErrorKind::QueueFull.as_str(), "queue_full");
+        assert_eq!(
+            CoreErrorKind::OperationConflict.as_str(),
+            "operation_conflict"
+        );
+        assert_eq!(
+            CoreErrorKind::BackendUnavailable.as_str(),
+            "backend_unavailable"
+        );
+        assert_eq!(CoreErrorKind::Internal.as_str(), "internal");
     }
 
     #[test]

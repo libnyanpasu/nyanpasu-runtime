@@ -52,12 +52,16 @@ where
     envelope
 }
 
-fn error_envelope_with_kind<T>(msg: &'static str, kind: CoreErrorKind) -> R<'static, T>
+fn error_envelope_with_kind<T>(
+    msg: &'static str,
+    kind: CoreErrorKind,
+    retryable: Option<bool>,
+) -> R<'static, T>
 where
     T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
 {
     let mut envelope: R<'static, T> =
-        RBuilder::other_error_with_kind(Cow::Borrowed(msg), Some(kind));
+        RBuilder::other_error_with_kind(Cow::Borrowed(msg), Some(kind), retryable);
     envelope.ts = TS;
     envelope
 }
@@ -719,24 +723,54 @@ fn the_error_kind_strings_are_pinned() {
             r#""apply_rollback_failed""#,
         ),
         (CoreErrorKind::StopUnconfirmed, r#""stop_unconfirmed""#),
+        // The control-plane admission and routing kinds (PR-A).
+        (CoreErrorKind::ShuttingDown, r#""shutting_down""#),
+        (CoreErrorKind::QueueFull, r#""queue_full""#),
+        (CoreErrorKind::OperationConflict, r#""operation_conflict""#),
+        (
+            CoreErrorKind::BackendUnavailable,
+            r#""backend_unavailable""#,
+        ),
+        (CoreErrorKind::Internal, r#""internal""#),
     ] {
         assert_eq!(serde_json::to_string(&kind).unwrap(), expected);
     }
     // Every kind is covered above; a new one must be added here too.
-    assert_eq!(CoreErrorKind::ALL.len(), 12);
+    assert_eq!(CoreErrorKind::ALL.len(), 17);
 }
 
 /// The new field is appended, so no existing key moves; the absent case is
 /// pinned by every other envelope golden in this file staying unchanged.
 #[test]
 fn an_error_envelope_carries_its_kind() {
-    let envelope: R<'static, ()> =
-        error_envelope_with_kind("config revision conflict", CoreErrorKind::RevisionConflict);
+    let envelope: R<'static, ()> = error_envelope_with_kind(
+        "config revision conflict",
+        CoreErrorKind::RevisionConflict,
+        None,
+    );
     assert_eq!(
         serde_json::to_string(&envelope).unwrap(),
         concat!(
             r#"{"code":"OtherError","msg":"config revision conflict","data":null,"#,
             r#""ts":1700000000,"error_kind":"revision_conflict"}"#
+        )
+    );
+}
+
+/// `retryable` is appended after `error_kind`, and an unanswered one is still
+/// omitted — the literal above is the proof that adding it moved no key.
+#[test]
+fn an_error_envelope_carries_its_retryability() {
+    let envelope: R<'static, ()> = error_envelope_with_kind(
+        "the operation queue is full",
+        CoreErrorKind::QueueFull,
+        Some(true),
+    );
+    assert_eq!(
+        serde_json::to_string(&envelope).unwrap(),
+        concat!(
+            r#"{"code":"OtherError","msg":"the operation queue is full","data":null,"#,
+            r#""ts":1700000000,"error_kind":"queue_full","retryable":true}"#
         )
     );
 }
@@ -749,6 +783,7 @@ fn a_pre_s8_envelope_still_decodes() {
     let decoded: R<'static, ()> = serde_json::from_str(legacy).unwrap();
     assert_eq!(decoded.code, ResponseCode::OtherError);
     assert!(decoded.error_kind.is_none());
+    assert!(decoded.retryable.is_none());
 }
 
 #[test]

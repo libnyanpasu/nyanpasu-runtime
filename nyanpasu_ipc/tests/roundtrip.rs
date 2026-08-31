@@ -401,6 +401,7 @@ async fn apply_config_conflict_handler() -> (StatusCode, Json<CoreApplyRes<'stat
         Json(RBuilder::other_error_with_kind(
             Cow::Borrowed("config revision conflict"),
             Some(CoreErrorKind::RevisionConflict),
+            None,
         )),
     )
 }
@@ -747,6 +748,56 @@ async fn apply_config_roundtrip() {
 
     let _ = shutdown.send(());
     cleanup(&placeholder);
+}
+
+/// The control plane decides retryability per failure, not per kind, so the
+/// answer has to survive the wire in both polarities — including `false`, which
+/// an absent field would silently impersonate.
+#[tokio::test]
+async fn v2_server_error_roundtrips_kind_and_retryability() {
+    for (index, (kind, retryable)) in [
+        (CoreErrorKind::QueueFull, true),
+        (CoreErrorKind::OperationConflict, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let placeholder = format!("nyanpasu-ipc-test-{}-retry{index}", std::process::id());
+        let router = Router::new()
+            .route(STATUS_ENDPOINT, get(status_handler))
+            .route(
+                CORE_APPLY_ENDPOINT,
+                post(move || async move {
+                    let envelope: CoreApplyRes<'static> = RBuilder::other_error_with_kind(
+                        Cow::Borrowed("classified failure"),
+                        Some(kind),
+                        Some(retryable),
+                    );
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(envelope))
+                }),
+            );
+        let Some((shutdown, client)) = run_server(&placeholder, router).await else {
+            return;
+        };
+
+        let error = client.apply_config(&apply_payload()).await.unwrap_err();
+        assert_eq!(error.core_error_kind(), Some(kind));
+        assert_eq!(error.retryable(), retryable);
+        match error {
+            ClientError::Server {
+                error_kind,
+                retryable: wire,
+                ..
+            } => {
+                assert_eq!(error_kind.as_deref(), Some(kind.as_str()));
+                assert_eq!(wire, Some(retryable));
+            }
+            other => panic!("expected a classified server error, got: {other:?}"),
+        }
+
+        let _ = shutdown.send(());
+        cleanup(&placeholder);
+    }
 }
 
 /// The envelope's `error_kind` has to reach the caller, or classifying failures

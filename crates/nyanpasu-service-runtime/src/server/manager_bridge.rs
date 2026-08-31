@@ -6,14 +6,22 @@ use std::{
 
 use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
-    ApplyOutcome, ConfigRevision, CoreErrorKind, CoreKind, CoreManager as Manager, CoreSpec,
-    CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, HealthState, HealthStatus,
-    Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel, ManagerOptions,
-    RevisionId,
+    ApplyOutcome, ConfigInput, ConfigRevision, ControlOptions, CoreCommand, CoreCommandEnvelope,
+    CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
+    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, ExecutorExit,
+    HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame,
+    LogLevel, ManagerOptions, OperationHandle, OperationId, OperationOutput, OperationState,
+    ReconcileRequest, RevisionId,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
-    core::apply::{ApplyOutcomeKind, CoreApplyData},
+    core::{
+        apply::{ApplyOutcomeKind, CoreApplyData},
+        v2::{
+            CoreCommandInfo, CoreOperationReq, CoreSubmitReq, OperationErrorInfo, OperationInfo,
+            OperationOutputInfo, OperationPhase, ReconcileOutcomeInfo, ReconcileOutcomeKind,
+        },
+    },
     status::{
         ConfigRevisionInfo, CoreControllerInfo, CoreHealthInfo, CoreHealthState, CoreInfos,
         CoreState, CoreStateDetail, RevisionIdInfo,
@@ -37,6 +45,16 @@ const CORE_LOG_TARGET: &str = "nyanpasu_service::core";
 /// other.
 const MAX_CONCURRENT_CHECKS: usize = 2;
 
+/// Long-poll clamp for `/v2/core/operation`, kept well under the route
+/// middleware's 120s liveness bound.
+const MAX_OPERATION_WAIT_MS: u64 = 90_000;
+
+/// Upper bound on the executor-first shutdown: the transaction already in
+/// flight has to finish before the queued `Shutdown` can run. Exceeding it is
+/// reported, never waited out — a leaked core is collected by the next
+/// construction's orphan sweep, a hung daemon exit is not collected by anything.
+const CORE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Legacy wire strings the GUI branches on. These are protocol, not
 /// diagnostics: changing any of them is a breaking change to clash-nyanpasu.
 pub(crate) const MSG_CORE_ALREADY_RUNNING: &str = "core is already running";
@@ -52,6 +70,11 @@ pub(crate) const MSG_CORE_NOT_STARTED: &str = "core have not been started yet";
 pub(crate) struct OpError {
     kind: Option<CoreErrorKind>,
     message: String,
+    /// The producer's answer, when it has one. Left `None` everywhere the
+    /// service is only classifying a failure it observed: the kind's default
+    /// is the client's fallback, and repeating it here would turn a guess into
+    /// an assertion on the wire.
+    retryable: Option<bool>,
 }
 
 impl OpError {
@@ -61,6 +84,7 @@ impl OpError {
         Self {
             kind: None,
             message: message.into(),
+            retryable: None,
         }
     }
 
@@ -70,7 +94,15 @@ impl OpError {
         Self {
             kind: Some(kind),
             message: message.into(),
+            retryable: None,
         }
+    }
+
+    /// Pins retryability the control plane already decided, rather than leaving
+    /// the client to infer it from the kind.
+    fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = Some(retryable);
+        self
     }
 
     /// The error envelope for this failure, `error_kind` included.
@@ -78,7 +110,7 @@ impl OpError {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug,
     {
-        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind)
+        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind, self.retryable)
     }
 }
 
@@ -86,6 +118,7 @@ impl From<ManagerError> for OpError {
     fn from(error: ManagerError) -> Self {
         Self {
             kind: error.kind(),
+            retryable: None,
             message: match &error {
                 // The legacy wire string the GUI already branches on, so
                 // `apply` on a stopped core reads exactly like `restart` on
@@ -105,6 +138,10 @@ impl From<anyhow::Error> for OpError {
 
 struct Inner {
     manager: Manager,
+    /// The v2 control plane over the same manager: bounded queue, idempotency
+    /// registry, cancellation isolation. The v1 methods below keep calling the
+    /// manager directly until the bridge stage deletes them.
+    control: CoreControl,
     /// Wire-type echo: the manager knows nothing about the alpha variants.
     ///
     /// A watch channel rather than a lock, because committing the echo has to be
@@ -114,8 +151,15 @@ struct Inner {
     /// `Arc<Inner>` inside that task would keep the manager alive, so its watch
     /// channel would never close and the task would never exit.
     requested_core: watch::Sender<Option<CoreType>>,
+    /// The executor sequence of the newest reconcile whose echo has been
+    /// applied. Reconciles run serially, but the tasks watching them do not:
+    /// two completions can be observed in either order, and applying the older
+    /// one second would leave the wire claiming a type the runtime no longer
+    /// has. Guarding the read-compare-write together is what makes the echo
+    /// last-writer-by-execution-order rather than last-observer-wins.
+    echo_applied: parking_lot::Mutex<Option<u64>>,
     /// Serializes adapter-level control ops and carries the closing latch.
-    control: tokio::sync::Mutex<ControlState>,
+    control_state: tokio::sync::Mutex<ControlState>,
     /// F2 lands here too; see §2.2.
     check_slots: Semaphore,
 }
@@ -133,18 +177,24 @@ impl CoreManagerService {
     pub async fn new(
         runtime_dir: Utf8PathBuf,
         local_ipc_policy: LocalIpcPolicy,
+        data_dir: Utf8PathBuf,
     ) -> Result<Self, anyhow::Error> {
+        let source_dir = runtime_dir.join("v2-sources");
         let manager = Manager::new(ManagerOptions {
             runtime_dir: Some(runtime_dir),
             local_ipc_policy,
             ..ManagerOptions::default()
         })
         .await?;
+        let core_control =
+            CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, data_dir));
         Ok(Self {
             inner: Arc::new(Inner {
                 manager,
+                control: core_control,
                 requested_core: watch::Sender::new(None),
-                control: tokio::sync::Mutex::new(ControlState { closing: false }),
+                echo_applied: parking_lot::Mutex::new(None),
+                control_state: tokio::sync::Mutex::new(ControlState { closing: false }),
                 check_slots: Semaphore::new(MAX_CONCURRENT_CHECKS),
             }),
         })
@@ -185,16 +235,45 @@ impl CoreManagerService {
     }
 
     /// Stop the core and clean runtime artifacts. Idempotent; errors are logged, not returned.
+    ///
+    /// The stop goes through the v2 executor, which owns the closing latch:
+    /// calling the manager directly would leave the executor accepting work,
+    /// and a reconcile queued a moment earlier would put a core back up behind
+    /// the shutdown that was supposed to end it. The v1 latch below is kept
+    /// only as the v1 routing mirror it always was.
     pub async fn shutdown(&self) {
-        let mut control = self.inner.control.lock().await;
+        let mut control = self.inner.control_state.lock().await;
         if control.closing {
             return;
         }
         control.closing = true;
         drop(control);
-        if let Err(error) = self.inner.manager.shutdown().await {
-            tracing::error!("failed to stop the core on shutdown: {error}");
+
+        match tokio::time::timeout(CORE_SHUTDOWN_TIMEOUT, self.inner.control.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if self.inner.control.executor_is_closed() => {
+                // Not a bypass: with the executor gone there is no transaction
+                // owner left, and the manager is the only remaining way to stop
+                // a core this process still owns.
+                tracing::error!(
+                    "the control executor is gone ({error}); stopping the core directly"
+                );
+                if let Err(error) = self.inner.manager.shutdown().await {
+                    tracing::error!("failed to stop the core on shutdown: {error}");
+                }
+            }
+            Ok(Err(error)) => tracing::error!("failed to stop the core on shutdown: {error}"),
+            Err(_) => tracing::error!(
+                "the core did not shut down within {CORE_SHUTDOWN_TIMEOUT:?}; \
+                 leaving it to the next orphan sweep"
+            ),
         }
+    }
+
+    /// Resolves when the v2 control executor exits, so the daemon can refuse to
+    /// keep serving a control plane that is no longer there.
+    pub async fn until_control_closed(&self) -> ExecutorExit {
+        self.inner.control.until_closed().await
     }
 
     #[instrument(skip(self, infos))]
@@ -204,7 +283,7 @@ impl CoreManagerService {
         core_type: &CoreType,
         config_path: &Utf8Path,
     ) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -236,7 +315,7 @@ impl CoreManagerService {
     }
 
     pub async fn stop(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -248,7 +327,7 @@ impl CoreManagerService {
     }
 
     pub async fn restart(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             anyhow::bail!("service is shutting down");
         }
@@ -273,7 +352,7 @@ impl CoreManagerService {
         config_file: &Path,
         expected_revision: Option<&RevisionIdInfo>,
     ) -> Result<CoreApplyData, OpError> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             return Err(OpError::plain("service is shutting down"));
         }
@@ -312,7 +391,7 @@ impl CoreManagerService {
             // Released before the check runs: it spawns the core binary, and
             // holding the adapter latch across an external process would block
             // start/stop/restart for as long as that takes.
-            let control = self.inner.control.lock().await;
+            let control = self.inner.control_state.lock().await;
             if control.closing {
                 return Err(OpError::plain("service is shutting down"));
             }
@@ -335,7 +414,7 @@ impl CoreManagerService {
     /// confirmed. Idempotent: succeeds when nothing was quarantined.
     #[instrument(skip(self))]
     pub async fn recover(&self) -> Result<(), OpError> {
-        let control = self.inner.control.lock().await;
+        let control = self.inner.control_state.lock().await;
         if control.closing {
             return Err(OpError::plain("service is shutting down"));
         }
@@ -358,6 +437,129 @@ impl CoreManagerService {
             .manager
             .log_dir()
             .map(|dir| dir.as_std_path().to_path_buf())
+    }
+
+    /// `POST /v2/core/submit`: admission into the control plane. Synchronous —
+    /// the executor owns the transaction from here on, and a dropped
+    /// connection cancels nothing.
+    pub fn submit_v2(
+        &self,
+        infos: &RuntimeInfos,
+        request: &CoreSubmitReq<'_>,
+    ) -> Result<OperationInfo, OpError> {
+        let id: OperationId = request.operation_id.parse().map_err(|_| {
+            OpError::plain(format!("malformed operation id: {}", request.operation_id))
+        })?;
+        let mut echoed_core = None;
+        let command = match &request.command {
+            CoreCommandInfo::Reconcile {
+                core_type,
+                config,
+                expected_digest,
+                expected_applied,
+            } => {
+                // Binary resolution and kind mapping are host policy; reuse
+                // the v1 spec builder for both. The placeholder config path is
+                // never read — the config ships as bytes and the control plane
+                // materializes it itself.
+                let spec = self.instance_spec(infos, core_type, Utf8PathBuf::new())?;
+                echoed_core = Some(core_type.clone().into_owned());
+                CoreCommand::Reconcile(Box::new(ReconcileRequest {
+                    core: spec.core,
+                    config: ConfigInput::Inline {
+                        bytes: config.as_bytes().to_vec(),
+                        expected_digest: expected_digest.as_ref().map(|digest| digest.to_string()),
+                    },
+                    options: spec.options,
+                    expected_applied: expected_applied.as_ref().map(map_revision_id),
+                }))
+            }
+            CoreCommandInfo::Stop => CoreCommand::Stop,
+            CoreCommandInfo::Recover => CoreCommand::Recover,
+        };
+        let handle = self
+            .inner
+            .control
+            .submit(CoreCommandEnvelope {
+                operation_id: id,
+                command,
+            })
+            .map_err(op_error_from_control)?;
+        let admitted = map_operation(handle.id(), handle.state());
+        // After admission, and only for the submit that registered it: a
+        // rejected envelope must leave no watcher behind, and an idempotent
+        // re-submit must not add a second one to the same operation.
+        if let Some(core_type) = echoed_core
+            && handle.newly_admitted()
+        {
+            self.watch_reconcile_echo(handle, core_type);
+        }
+        Ok(admitted)
+    }
+
+    /// `POST /v2/core/operation`: registry query, optionally long-polling.
+    pub async fn operation_v2(
+        &self,
+        request: &CoreOperationReq<'_>,
+    ) -> Result<OperationInfo, OpError> {
+        let id: OperationId = request.operation_id.parse().map_err(|_| {
+            OpError::plain(format!("malformed operation id: {}", request.operation_id))
+        })?;
+        let state = match request.wait_ms {
+            Some(wait_ms) => {
+                let bound = std::time::Duration::from_millis(wait_ms.min(MAX_OPERATION_WAIT_MS));
+                self.inner.control.wait_operation(id, bound).await
+            }
+            None => self.inner.control.operation(id),
+        };
+        state.map(|state| map_operation(id, state)).ok_or_else(|| {
+            OpError::plain(format!(
+                "unknown operation {id}: the registry entry was evicted or never existed; \
+                 re-read /v2/core/status and rely on the revision CAS"
+            ))
+        })
+    }
+
+    /// Keeps the v1 wire-type echo truthful for v2 reconciles: committed only
+    /// when the transaction actually put that core type in place, observed
+    /// from the operation itself rather than assumed at admission.
+    ///
+    /// No bound on the wait: every operation reaches a terminal state, an
+    /// executor death included, so the watcher always ends.
+    fn watch_reconcile_echo(&self, handle: OperationHandle, core_type: CoreType) {
+        let service = self.clone();
+        let sequence = handle.sequence();
+        tokio::spawn(async move {
+            let state = match handle.wait().await {
+                Ok(output) => OperationState::Succeeded(output),
+                Err(error) => OperationState::Failed(error),
+            };
+            let commits = echo_commits(&state);
+            if !commits
+                && !matches!(
+                    state,
+                    OperationState::Succeeded(OperationOutput::Reconciled(_))
+                )
+            {
+                // The transaction never reached a commit point, so it says
+                // nothing about the echo either way.
+                return;
+            }
+            let mut applied = service.inner.echo_applied.lock();
+            if applied.is_some_and(|latest| latest >= sequence) {
+                // A later reconcile already had the last word.
+                return;
+            }
+            *applied = Some(sequence);
+            if commits {
+                service.publish_requested_core(Some(&core_type));
+            } else {
+                // A rollback restored the old spec, so the echo must not claim
+                // the requested type — but the revision and state still moved,
+                // so clients need the fresh snapshot. Same rule as v1 apply.
+                service.publish_requested_core(None);
+            }
+        });
     }
 
     /// Publish the wire-type echo the bridge projects into status snapshots.
@@ -601,6 +803,103 @@ fn map_revision_id(info: &RevisionIdInfo) -> RevisionId {
 /// keep every warning. `ApplyOutcome` is not `#[non_exhaustive]`: if the
 /// manager grows a variant, this match must fail to compile rather than
 /// silently mislabel it.
+/// Whether an operation's terminal state committed the core type it asked for.
+/// Only a reconcile can, and only one that was not rolled back:
+/// `DurabilityUncertain` wraps the real outcome and is unwrapped first.
+fn echo_commits(state: &OperationState) -> bool {
+    let OperationState::Succeeded(OperationOutput::Reconciled(outcome)) = state else {
+        return false;
+    };
+    let mut effective = outcome;
+    while let ApplyOutcome::DurabilityUncertain { outcome, .. } = effective {
+        effective = &**outcome;
+    }
+    !matches!(effective, ApplyOutcome::RolledBack { .. })
+}
+
+fn op_error_from_control(error: ControlError) -> OpError {
+    let retryable = error.retryable;
+    match error.kind {
+        Some(kind) => OpError::with_kind(kind, error.message),
+        None => OpError::plain(error.message),
+    }
+    .retryable(retryable)
+}
+
+fn map_operation(id: OperationId, state: OperationState) -> OperationInfo {
+    let (phase, output, error) = match state {
+        OperationState::Queued => (OperationPhase::Queued, None, None),
+        OperationState::Running => (OperationPhase::Running, None, None),
+        OperationState::Succeeded(output) => (
+            OperationPhase::Succeeded,
+            Some(map_operation_output(output)),
+            None,
+        ),
+        OperationState::Failed(failure) => (
+            OperationPhase::Failed,
+            None,
+            Some(OperationErrorInfo {
+                kind: failure.kind.map(|kind| Cow::Borrowed(kind.as_str())),
+                message: failure.message,
+                retryable: failure.retryable,
+            }),
+        ),
+    };
+    OperationInfo {
+        id: id.to_string(),
+        phase,
+        output,
+        error,
+    }
+}
+
+fn map_operation_output(output: OperationOutput) -> OperationOutputInfo {
+    match output {
+        OperationOutput::Reconciled(outcome) => {
+            OperationOutputInfo::Reconciled(map_reconcile_outcome(&outcome))
+        }
+        OperationOutput::Stopped => OperationOutputInfo::Stopped,
+        OperationOutput::Recovered => OperationOutputInfo::Recovered,
+        OperationOutput::ShutDown => OperationOutputInfo::ShutDown,
+    }
+}
+
+/// The v2 sibling of [`map_apply_outcome`]: same durability unwrapping, plus
+/// the `Started` variant only `reconcile` produces.
+fn map_reconcile_outcome(outcome: &ApplyOutcome) -> ReconcileOutcomeInfo {
+    let mut warnings = Vec::new();
+    let mut current = outcome;
+    while let ApplyOutcome::DurabilityUncertain { outcome, warning } = current {
+        warnings.push(warning.clone());
+        current = &**outcome;
+    }
+    let (kind, revision, failed_apply) = match current {
+        ApplyOutcome::Started { revision } => (ReconcileOutcomeKind::Started, revision, None),
+        ApplyOutcome::Noop { revision } => (ReconcileOutcomeKind::Noop, revision, None),
+        ApplyOutcome::Patched { revision } => (ReconcileOutcomeKind::Patched, revision, None),
+        ApplyOutcome::Reloaded { revision } => (ReconcileOutcomeKind::Reloaded, revision, None),
+        ApplyOutcome::Restarted { revision } => (ReconcileOutcomeKind::Restarted, revision, None),
+        ApplyOutcome::Switched { revision } => (ReconcileOutcomeKind::Switched, revision, None),
+        ApplyOutcome::RolledBack {
+            revision,
+            failed_apply,
+        } => (
+            ReconcileOutcomeKind::RolledBack,
+            revision,
+            Some(failed_apply.clone()),
+        ),
+        ApplyOutcome::DurabilityUncertain { .. } => {
+            unreachable!("unwrapped by the loop above")
+        }
+    };
+    ReconcileOutcomeInfo {
+        outcome: kind,
+        revision: map_revision(revision),
+        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+        failed_apply,
+    }
+}
+
 fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
     let mut warnings = Vec::new();
     let mut current = outcome;
@@ -627,6 +926,11 @@ fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
         ),
         ApplyOutcome::DurabilityUncertain { .. } => {
             unreachable!("unwrapped by the loop above")
+        }
+        // The v1 apply handler feeds this from `apply_config`, which requires
+        // a running core; only the v2 `reconcile` path can cold-start.
+        ApplyOutcome::Started { .. } => {
+            unreachable!("apply_config never cold-starts a core")
         }
     };
     CoreApplyData {
@@ -1260,7 +1564,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let runtime_dir = Utf8PathBuf::from_path_buf(dir.path().join("core-runtime"))
             .expect("temp path is UTF-8");
-        let service = CoreManagerService::new(runtime_dir, LocalIpcPolicy::Disable)
+        let data_dir = Utf8PathBuf::from_path_buf(dir.path().join("nyanpasu-data"))
+            .expect("temp path is UTF-8");
+        let service = CoreManagerService::new(runtime_dir, LocalIpcPolicy::Disable, data_dir)
             .await
             .expect("the manager builds on a fresh runtime dir");
         (dir, service)
@@ -1580,6 +1886,68 @@ mod tests {
         assert!(infos.health.is_none());
         assert!(infos.revision.is_none());
         assert!(infos.config_path.is_none());
+    }
+
+    /// The echo names the core type a reconcile *put in place*. Anything else
+    /// — a rollback, a non-reconcile outcome, a failure — must leave it alone.
+    #[test]
+    fn only_a_committed_reconcile_moves_the_wire_type_echo() {
+        for outcome in [
+            ApplyOutcome::Started {
+                revision: revision(1),
+            },
+            ApplyOutcome::Noop {
+                revision: revision(2),
+            },
+            ApplyOutcome::Patched {
+                revision: revision(3),
+            },
+            ApplyOutcome::Reloaded {
+                revision: revision(4),
+            },
+            ApplyOutcome::Restarted {
+                revision: revision(5),
+            },
+            ApplyOutcome::Switched {
+                revision: revision(6),
+            },
+        ] {
+            assert!(
+                super::echo_commits(&OperationState::Succeeded(OperationOutput::Reconciled(
+                    outcome.clone()
+                ))),
+                "{outcome:?} committed the requested core type"
+            );
+        }
+
+        let rolled_back = ApplyOutcome::RolledBack {
+            revision: revision(7),
+            failed_apply: "boom".to_owned(),
+        };
+        for outcome in [
+            rolled_back.clone(),
+            ApplyOutcome::DurabilityUncertain {
+                outcome: Box::new(rolled_back),
+                warning: "the parent directory was not synced".to_owned(),
+            },
+        ] {
+            assert!(!super::echo_commits(&OperationState::Succeeded(
+                OperationOutput::Reconciled(outcome)
+            )));
+        }
+
+        for output in [
+            OperationOutput::Stopped,
+            OperationOutput::Recovered,
+            OperationOutput::ShutDown,
+        ] {
+            assert!(!super::echo_commits(&OperationState::Succeeded(output)));
+        }
+        assert!(!super::echo_commits(&OperationState::Queued));
+        assert!(!super::echo_commits(&OperationState::Running));
+        assert!(!super::echo_commits(&OperationState::Failed(
+            ControlError::new(CoreErrorKind::InvalidConfig, "bad", false)
+        )));
     }
 }
 
