@@ -90,7 +90,7 @@ pub struct RevisionIdInfo {
 
 impl ConfigRevisionInfo {
     /// The CAS token for this revision, for feeding a `/status` snapshot
-    /// straight back into `POST /core/apply`'s `expected_revision`.
+    /// straight back into a `Reconcile` submission's `expected_applied`.
     ///
     /// Which fields make up the identity is protocol knowledge, not caller
     /// convenience — hence a method here rather than a struct literal at every
