@@ -15,12 +15,9 @@ use nyanpasu_core_manager::{
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
-    core::{
-        apply::{ApplyOutcomeKind, CoreApplyData},
-        v2::{
-            CoreCommandInfo, CoreOperationReq, CoreSubmitReq, OperationErrorInfo, OperationInfo,
-            OperationOutputInfo, OperationPhase, ReconcileOutcomeInfo, ReconcileOutcomeKind,
-        },
+    core::v2::{
+        CoreCommandInfo, CoreOperationReq, CoreSubmitReq, OperationErrorInfo, OperationInfo,
+        OperationOutputInfo, OperationPhase, ReconcileOutcomeInfo, ReconcileOutcomeKind,
     },
     status::{
         ConfigRevisionInfo, CoreControllerInfo, CoreHealthInfo, CoreHealthState, CoreInfos,
@@ -326,59 +323,6 @@ impl CoreManagerService {
         }
     }
 
-    pub async fn restart(&self) -> Result<(), anyhow::Error> {
-        let control = self.inner.control_state.lock().await;
-        if control.closing {
-            anyhow::bail!("service is shutting down");
-        }
-        match self.inner.manager.restart().await {
-            Ok(_outcome) => Ok(()),
-            Err(ManagerError::NotStarted) => anyhow::bail!(MSG_CORE_NOT_STARTED),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Apply `config_file` to the running core.
-    ///
-    /// The manager classifies the change and routes it: in-place patch, reload,
-    /// same-epoch restart with rollback, or a full core switch when the process
-    /// spec changed (which is what a different `core_type` produces). A stopped
-    /// core is an error, never an implicit start (report §7 R2).
-    #[instrument(skip(self, infos))]
-    pub async fn apply(
-        &self,
-        infos: &RuntimeInfos,
-        core_type: &CoreType,
-        config_file: &Path,
-        expected_revision: Option<&RevisionIdInfo>,
-    ) -> Result<CoreApplyData, OpError> {
-        let control = self.inner.control_state.lock().await;
-        if control.closing {
-            return Err(OpError::plain("service is shutting down"));
-        }
-        let config_path = canonical_config_path(config_file).await?;
-        let spec = self.instance_spec(infos, core_type, config_path)?;
-        let outcome = self
-            .inner
-            .manager
-            .apply_config(spec, expected_revision.map(map_revision_id))
-            .await?;
-        let data = map_apply_outcome(&outcome);
-        tracing::info!(
-            outcome = ?data.outcome,
-            epoch = data.revision.epoch,
-            generation = data.revision.generation,
-            "Applied config"
-        );
-        // A rollback put the *old* spec back, so the wire echo must not claim
-        // the core type that was asked for — but the snapshot still moved, so
-        // publish either way.
-        self.publish_requested_core(
-            (data.outcome != ApplyOutcomeKind::RolledBack).then_some(core_type),
-        );
-        Ok(data)
-    }
-
     /// Dry-run a config against a core binary. Never touches the running core.
     #[instrument(skip(self, infos))]
     pub async fn check(
@@ -407,18 +351,6 @@ impl CoreManagerService {
         let config_path = canonical_config_path(config_file).await?;
         let spec = self.instance_spec(infos, core_type, config_path)?;
         self.inner.manager.check_config(&spec).await?;
-        Ok(())
-    }
-
-    /// Clear the quarantine latch left by an epoch whose death could not be
-    /// confirmed. Idempotent: succeeds when nothing was quarantined.
-    #[instrument(skip(self))]
-    pub async fn recover(&self) -> Result<(), OpError> {
-        let control = self.inner.control_state.lock().await;
-        if control.closing {
-            return Err(OpError::plain("service is shutting down"));
-        }
-        self.inner.manager.recover_quarantine().await?;
         Ok(())
     }
 
@@ -864,8 +796,6 @@ fn map_operation_output(output: OperationOutput) -> OperationOutputInfo {
     }
 }
 
-/// The v2 sibling of [`map_apply_outcome`]: same durability unwrapping, plus
-/// the `Started` variant only `reconcile` produces.
 fn map_reconcile_outcome(outcome: &ApplyOutcome) -> ReconcileOutcomeInfo {
     let mut warnings = Vec::new();
     let mut current = outcome;
@@ -893,47 +823,6 @@ fn map_reconcile_outcome(outcome: &ApplyOutcome) -> ReconcileOutcomeInfo {
         }
     };
     ReconcileOutcomeInfo {
-        outcome: kind,
-        revision: map_revision(revision),
-        warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
-        failed_apply,
-    }
-}
-
-fn map_apply_outcome(outcome: &ApplyOutcome) -> CoreApplyData {
-    let mut warnings = Vec::new();
-    let mut current = outcome;
-    while let ApplyOutcome::DurabilityUncertain { outcome, warning } = current {
-        warnings.push(warning.clone());
-        current = &**outcome;
-    }
-    let (kind, revision, failed_apply) = match current {
-        ApplyOutcome::Noop { revision } => (ApplyOutcomeKind::Noop, revision, None),
-        ApplyOutcome::Patched { revision } => (ApplyOutcomeKind::Patched, revision, None),
-        ApplyOutcome::Reloaded { revision } => (ApplyOutcomeKind::Reloaded, revision, None),
-        ApplyOutcome::Restarted { revision } => (ApplyOutcomeKind::Restarted, revision, None),
-        // Live since S10: the manager reports the core-switch path separately
-        // from a same-epoch restart, so the wire value S8 declared and never
-        // sent is finally produced here.
-        ApplyOutcome::Switched { revision } => (ApplyOutcomeKind::Switched, revision, None),
-        ApplyOutcome::RolledBack {
-            revision,
-            failed_apply,
-        } => (
-            ApplyOutcomeKind::RolledBack,
-            revision,
-            Some(failed_apply.clone()),
-        ),
-        ApplyOutcome::DurabilityUncertain { .. } => {
-            unreachable!("unwrapped by the loop above")
-        }
-        // The v1 apply handler feeds this from `apply_config`, which requires
-        // a running core; only the v2 `reconcile` path can cold-start.
-        ApplyOutcome::Started { .. } => {
-            unreachable!("apply_config never cold-starts a core")
-        }
-    };
-    CoreApplyData {
         outcome: kind,
         revision: map_revision(revision),
         warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
@@ -1420,41 +1309,47 @@ mod tests {
     }
 
     #[test]
-    fn apply_outcomes_map_onto_the_wire_kinds() {
+    fn reconcile_outcomes_map_onto_the_wire_kinds() {
         let cases = [
+            (
+                ApplyOutcome::Started {
+                    revision: revision(6),
+                },
+                ReconcileOutcomeKind::Started,
+            ),
             (
                 ApplyOutcome::Noop {
                     revision: revision(7),
                 },
-                ApplyOutcomeKind::Noop,
+                ReconcileOutcomeKind::Noop,
             ),
             (
                 ApplyOutcome::Patched {
                     revision: revision(8),
                 },
-                ApplyOutcomeKind::Patched,
+                ReconcileOutcomeKind::Patched,
             ),
             (
                 ApplyOutcome::Reloaded {
                     revision: revision(9),
                 },
-                ApplyOutcomeKind::Reloaded,
+                ReconcileOutcomeKind::Reloaded,
             ),
             (
                 ApplyOutcome::Restarted {
                     revision: revision(10),
                 },
-                ApplyOutcomeKind::Restarted,
+                ReconcileOutcomeKind::Restarted,
             ),
             (
                 ApplyOutcome::Switched {
                     revision: revision(11),
                 },
-                ApplyOutcomeKind::Switched,
+                ReconcileOutcomeKind::Switched,
             ),
         ];
         for (outcome, expected) in cases {
-            let data = map_apply_outcome(&outcome);
+            let data = map_reconcile_outcome(&outcome);
             assert_eq!(data.outcome, expected);
             assert_eq!(data.revision.effective_hash, "fedcba9876543210");
             assert!(data.warning.is_none());
@@ -1468,11 +1363,11 @@ mod tests {
     /// it.
     #[test]
     fn a_rolled_back_apply_reports_the_old_revision_and_the_failure() {
-        let data = map_apply_outcome(&ApplyOutcome::RolledBack {
+        let data = map_reconcile_outcome(&ApplyOutcome::RolledBack {
             revision: revision(7),
             failed_apply: "core failed to start".to_owned(),
         });
-        assert_eq!(data.outcome, ApplyOutcomeKind::RolledBack);
+        assert_eq!(data.outcome, ReconcileOutcomeKind::RolledBack);
         assert_eq!(data.revision.generation, 7);
         assert_eq!(data.failed_apply.as_deref(), Some("core failed to start"));
     }
@@ -1488,8 +1383,8 @@ mod tests {
             }),
             warning: "directory sync failed".to_owned(),
         };
-        let data = map_apply_outcome(&single);
-        assert_eq!(data.outcome, ApplyOutcomeKind::Patched);
+        let data = map_reconcile_outcome(&single);
+        assert_eq!(data.outcome, ReconcileOutcomeKind::Patched);
         assert_eq!(data.warning.as_deref(), Some("directory sync failed"));
 
         let nested = ApplyOutcome::DurabilityUncertain {
@@ -1502,8 +1397,8 @@ mod tests {
             }),
             warning: "commit sync failed".to_owned(),
         };
-        let data = map_apply_outcome(&nested);
-        assert_eq!(data.outcome, ApplyOutcomeKind::RolledBack);
+        let data = map_reconcile_outcome(&nested);
+        assert_eq!(data.outcome, ReconcileOutcomeKind::RolledBack);
         assert_eq!(
             data.warning.as_deref(),
             Some("commit sync failed; restore sync failed")
