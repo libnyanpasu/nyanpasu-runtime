@@ -12,7 +12,7 @@ use crate::{
 
 use super::{
     Active, ApplyOutcome, CoreManager, Ctrl, EpochPlan, PreparedApply, abort_and_await,
-    quarantine::reject_quarantine, spawn_forwarder,
+    quarantine::reject_quarantine,
 };
 
 impl CoreManager {
@@ -306,14 +306,7 @@ impl CoreManager {
             Ok(instance) => {
                 let revision = desired.revision.clone();
                 let pid = instance.pid().unwrap_or_default();
-                let forwarder = spawn_forwarder(&self.inner, instance.state(), revision.epoch);
-                ctrl.last_spec = Some(desired.source_spec.clone());
-                ctrl.current = Some(Active {
-                    instance,
-                    forwarder,
-                    plan: desired,
-                });
-                let active = ctrl.current.as_ref().expect("just installed");
+                let active = self.install(ctrl, instance, desired);
                 self.inner.publish_active(
                     active,
                     CoreState::Running {
@@ -354,15 +347,7 @@ impl CoreManager {
                     Ok(instance) => {
                         let revision = old_plan.revision.clone();
                         let pid = instance.pid().unwrap_or_default();
-                        let forwarder =
-                            spawn_forwarder(&self.inner, instance.state(), revision.epoch);
-                        ctrl.last_spec = Some(old_plan.source_spec.clone());
-                        ctrl.current = Some(Active {
-                            instance,
-                            forwarder,
-                            plan: old_plan,
-                        });
-                        let active = ctrl.current.as_ref().expect("rollback installed");
+                        let active = self.install(ctrl, instance, old_plan);
                         self.inner.publish_active(
                             active,
                             CoreState::Running {
@@ -437,14 +422,7 @@ impl CoreManager {
             Ok(instance) => {
                 let revision = desired.revision.clone();
                 let pid = instance.pid().unwrap_or_default();
-                let forwarder = spawn_forwarder(&self.inner, instance.state(), revision.epoch);
-                ctrl.last_spec = Some(desired.source_spec.clone());
-                ctrl.current = Some(Active {
-                    instance,
-                    forwarder,
-                    plan: desired,
-                });
-                let active = ctrl.current.as_ref().expect("switch installed");
+                let active = self.install(ctrl, instance, desired);
                 self.inner.publish_active(
                     active,
                     CoreState::Running {
@@ -481,15 +459,7 @@ impl CoreManager {
                     Ok(instance) => {
                         let revision = old_plan.revision.clone();
                         let pid = instance.pid().unwrap_or_default();
-                        let forwarder =
-                            spawn_forwarder(&self.inner, instance.state(), revision.epoch);
-                        ctrl.last_spec = Some(old_plan.source_spec.clone());
-                        ctrl.current = Some(Active {
-                            instance,
-                            forwarder,
-                            plan: old_plan,
-                        });
-                        let active = ctrl.current.as_ref().expect("switch rollback installed");
+                        let active = self.install(ctrl, instance, old_plan);
                         self.inner.publish_active(
                             active,
                             CoreState::Running {

@@ -14,10 +14,8 @@ use crate::{
 };
 
 use super::{
-    Active, CoreManager, Ctrl, DegradeReason, EpochPlan, PreparedGraceful, SwitchOutcome,
-    abort_and_await,
+    CoreManager, Ctrl, DegradeReason, EpochPlan, PreparedGraceful, SwitchOutcome, abort_and_await,
     quarantine::{record_quarantine, reject_quarantine},
-    spawn_forwarder,
 };
 
 fn graceful_degrade_reason(
@@ -288,7 +286,13 @@ impl CoreManager {
         .await
         .unwrap_or(false);
         if reconciled {
-            self.install_switched(ctrl, instance, launch);
+            let pid = instance.pid().unwrap_or_default();
+            self.inner.publish_instance(
+                instance.as_ref(),
+                CoreState::Running { epoch, pid },
+                &launch,
+            );
+            self.install(ctrl, instance, launch);
             let result = self
                 .inner
                 .store
@@ -322,7 +326,13 @@ impl CoreManager {
                 return with_switch_durability_result(Err(error), durability_warning);
             }
         };
-        self.install_switched(ctrl, replacement, launch);
+        let pid = replacement.pid().unwrap_or_default();
+        self.inner.publish_instance(
+            replacement.as_ref(),
+            CoreState::Running { epoch, pid },
+            &launch,
+        );
+        self.install(ctrl, replacement, launch);
         let result =
             self.inner
                 .store
@@ -332,25 +342,6 @@ impl CoreManager {
                     reason: DegradeReason::PatchFailed,
                 });
         with_switch_durability_result(result, durability_warning)
-    }
-
-    fn install_switched(
-        &self,
-        ctrl: &mut Ctrl,
-        instance: Box<dyn RuntimeInstance>,
-        plan: EpochPlan,
-    ) {
-        let epoch = plan.revision.epoch;
-        let pid = instance.pid().unwrap_or_default();
-        self.inner
-            .publish_instance(instance.as_ref(), CoreState::Running { epoch, pid }, &plan);
-        let forwarder = spawn_forwarder(&self.inner, instance.state(), epoch);
-        ctrl.last_spec = Some(plan.source_spec.clone());
-        ctrl.current = Some(Active {
-            instance,
-            forwarder,
-            plan,
-        });
     }
 
     /// Launchability comes before capability: an unlaunchable kind or missing

@@ -436,13 +436,7 @@ impl CoreManager {
         let pid = instance.pid().unwrap_or_default();
         self.inner
             .publish_instance(instance.as_ref(), CoreState::Running { epoch, pid }, &plan);
-        let forwarder = spawn_forwarder(&self.inner, instance.state(), epoch);
-        ctrl.last_spec = Some(plan.source_spec.clone());
-        ctrl.current = Some(Active {
-            instance,
-            forwarder,
-            plan,
-        });
+        self.install(ctrl, instance, plan);
         Ok(())
     }
 
@@ -606,6 +600,27 @@ impl CoreManager {
                 log_tx: self.inner.log_tx.clone(),
             })
             .await
+    }
+
+    /// The one place an epoch enters the slot: forwarder, retained spec,
+    /// current. Publishes nothing. Every caller keeps its own `Running`
+    /// publication where it is today — before this call in `start` and the
+    /// graceful switch, after it in the apply compensations. The forwarder
+    /// publishes without the control lock, so which frame reaches the watch
+    /// first is observable downstream and is not this function's to decide.
+    fn install<'c>(
+        &self,
+        ctrl: &'c mut Ctrl,
+        instance: Box<dyn RuntimeInstance>,
+        plan: EpochPlan,
+    ) -> &'c mut Active {
+        let forwarder = spawn_forwarder(&self.inner, instance.state(), plan.revision.epoch);
+        ctrl.last_spec = Some(plan.source_spec.clone());
+        ctrl.current.insert(Active {
+            instance,
+            forwarder,
+            plan,
+        })
     }
 }
 
