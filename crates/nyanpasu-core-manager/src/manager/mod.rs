@@ -173,6 +173,15 @@ struct Active {
     plan: EpochPlan,
 }
 
+/// A stop that could not be proven, carrying the epoch it belongs to. What to
+/// do about it — discard a half-built candidate first, wrap the error, publish,
+/// latch quarantine — differs per transaction and stays with the caller, in the
+/// order that caller already has.
+struct RetireFailure {
+    epoch: u64,
+    error: Error,
+}
+
 struct PreparedGraceful {
     plan: EpochPlan,
     full_staged: StagedRuntimeConfig,
@@ -363,21 +372,7 @@ impl CoreManager {
         if running {
             return Err(Error::AlreadyRunning);
         }
-        if let Some(stale) = ctrl.current.take() {
-            abort_and_await(stale.forwarder).await;
-            let epoch = stale.instance.epoch();
-            if let Err(error) = stale
-                .instance
-                .stop_and_confirm_dead(self.inner.options.stop_timeout)
-                .await
-            {
-                if matches!(error, Error::StopUnconfirmed(_)) {
-                    return Err(self.latch_quarantine(&mut ctrl, epoch, error));
-                }
-                return Err(error);
-            }
-            self.inner.store.cleanup_epoch(epoch).await?;
-        }
+        self.discard_stale(&mut ctrl).await?;
         self.start_locked(&mut ctrl, spec).await
     }
 
@@ -621,6 +616,45 @@ impl CoreManager {
             forwarder,
             plan,
         })
+    }
+
+    /// The mechanics every stop shares: take the epoch out of the slot, silence
+    /// its forwarder, prove the process dead. Publishes nothing and latches no
+    /// quarantine — an unproven stop comes back as [`RetireFailure`] for the
+    /// caller to place in its own sequence.
+    async fn retire_current(&self, ctrl: &mut Ctrl) -> Result<Option<EpochPlan>, RetireFailure> {
+        let Some(Active {
+            instance,
+            forwarder,
+            plan,
+        }) = ctrl.current.take()
+        else {
+            return Ok(None);
+        };
+        abort_and_await(forwarder).await;
+        let epoch = plan.revision.epoch;
+        instance
+            .stop_and_confirm_dead(self.inner.options.stop_timeout)
+            .await
+            .map_err(|error| RetireFailure { epoch, error })?;
+        Ok(Some(plan))
+    }
+
+    /// Stale-epoch hygiene shared by start, switch and reconcile: a terminal
+    /// epoch still sitting in the slot is retired and its artifacts removed
+    /// before the slot is reused.
+    async fn discard_stale(&self, ctrl: &mut Ctrl) -> Result<(), Error> {
+        match self.retire_current(ctrl).await {
+            Ok(None) => Ok(()),
+            Ok(Some(plan)) => self.inner.store.cleanup_epoch(plan.revision.epoch).await,
+            Err(RetireFailure { epoch, error }) => {
+                Err(if matches!(error, Error::StopUnconfirmed(_)) {
+                    self.latch_quarantine(ctrl, epoch, error)
+                } else {
+                    error
+                })
+            }
+        }
     }
 }
 

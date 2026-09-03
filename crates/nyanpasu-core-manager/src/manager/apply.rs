@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::{
-    Active, ApplyOutcome, CoreManager, Ctrl, EpochPlan, PreparedApply, abort_and_await,
+    Active, ApplyOutcome, CoreManager, Ctrl, EpochPlan, PreparedApply, RetireFailure,
     quarantine::reject_quarantine,
 };
 
@@ -276,23 +276,20 @@ impl CoreManager {
         desired: EpochPlan,
         backup: crate::RuntimeConfigBackup,
     ) -> Result<ApplyOutcome, Error> {
-        let Active {
-            instance: old_instance,
-            forwarder: old_forwarder,
-            plan: old_plan,
-        } = ctrl.current.take().expect("current held by control lock");
-        abort_and_await(old_forwarder).await;
-        if let Err(error) = old_instance
-            .stop_and_confirm_dead(self.inner.options.stop_timeout)
-            .await
-        {
-            if matches!(error, Error::StopUnconfirmed(_)) {
-                return Err(self.latch_quarantine(ctrl, old_plan.revision.epoch, error));
+        let old_plan = match self.retire_current(ctrl).await {
+            Ok(retired) => retired.expect("current held by control lock"),
+            Err(RetireFailure {
+                epoch: retired_epoch,
+                error,
+            }) => {
+                if matches!(error, Error::StopUnconfirmed(_)) {
+                    return Err(self.latch_quarantine(ctrl, retired_epoch, error));
+                }
+                let message = format!("failed to stop current epoch for reconcile: {error}");
+                self.publish_terminal_error(&Error::ApplyFailed(message.clone()));
+                return Err(Error::ApplyFailed(message));
             }
-            let message = format!("failed to stop current epoch for reconcile: {error}");
-            self.publish_terminal_error(&Error::ApplyFailed(message.clone()));
-            return Err(Error::ApplyFailed(message));
-        }
+        };
 
         self.inner.publish(
             CoreState::Restarting {
@@ -391,24 +388,21 @@ impl CoreManager {
     ) -> Result<ApplyOutcome, Error> {
         let epoch = self.next_epoch();
         let desired = self.prepare_launch(&input, epoch, &snapshot).await?;
-        let Active {
-            instance: old_instance,
-            forwarder: old_forwarder,
-            plan: old_plan,
-        } = ctrl.current.take().expect("current held by control lock");
-        abort_and_await(old_forwarder).await;
-        if let Err(error) = old_instance
-            .stop_and_confirm_dead(self.inner.options.stop_timeout)
-            .await
-        {
-            let _ = self.inner.store.cleanup_epoch(epoch).await;
-            if matches!(error, Error::StopUnconfirmed(_)) {
-                return Err(self.latch_quarantine(ctrl, old_plan.revision.epoch, error));
+        let old_plan = match self.retire_current(ctrl).await {
+            Ok(retired) => retired.expect("current held by control lock"),
+            Err(RetireFailure {
+                epoch: retired_epoch,
+                error,
+            }) => {
+                let _ = self.inner.store.cleanup_epoch(epoch).await;
+                if matches!(error, Error::StopUnconfirmed(_)) {
+                    return Err(self.latch_quarantine(ctrl, retired_epoch, error));
+                }
+                let message = format!("failed to stop current epoch for switch: {error}");
+                self.publish_terminal_error(&Error::ApplyFailed(message.clone()));
+                return Err(Error::ApplyFailed(message));
             }
-            let message = format!("failed to stop current epoch for switch: {error}");
-            self.publish_terminal_error(&Error::ApplyFailed(message.clone()));
-            return Err(Error::ApplyFailed(message));
-        }
+        };
 
         self.inner.publish(
             CoreState::Switching {

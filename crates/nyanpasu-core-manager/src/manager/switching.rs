@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{
-    CoreManager, Ctrl, DegradeReason, EpochPlan, PreparedGraceful, SwitchOutcome, abort_and_await,
+    CoreManager, Ctrl, DegradeReason, EpochPlan, PreparedGraceful, RetireFailure, SwitchOutcome,
     quarantine::{record_quarantine, reject_quarantine},
 };
 
@@ -62,21 +62,7 @@ impl CoreManager {
             .as_ref()
             .is_some_and(|active| !active.instance.state().borrow().state.is_terminal());
         if !running {
-            if let Some(stale) = ctrl.current.take() {
-                abort_and_await(stale.forwarder).await;
-                let epoch = stale.instance.epoch();
-                if let Err(error) = stale
-                    .instance
-                    .stop_and_confirm_dead(self.inner.options.stop_timeout)
-                    .await
-                {
-                    if matches!(error, Error::StopUnconfirmed(_)) {
-                        return Err(self.latch_quarantine(ctrl, epoch, error));
-                    }
-                    return Err(error);
-                }
-                self.inner.store.cleanup_epoch(epoch).await?;
-            }
+            self.discard_stale(ctrl).await?;
             self.start_locked(ctrl, spec).await?;
             return Ok(SwitchOutcome::Hard {
                 reason: DegradeReason::NotRunning,
@@ -128,21 +114,20 @@ impl CoreManager {
             Some(&plan),
         );
 
-        let old = ctrl.current.take().expect("running checked by caller");
-        abort_and_await(old.forwarder).await;
-        let old_epoch = old.instance.epoch();
-        if let Err(error) = old
-            .instance
-            .stop_and_confirm_dead(self.inner.options.stop_timeout)
-            .await
-        {
-            let _ = self.inner.store.cleanup_epoch(epoch).await;
-            if matches!(error, Error::StopUnconfirmed(_)) {
-                return Err(self.latch_quarantine(ctrl, old_epoch, error));
+        let old_epoch = match self.retire_current(ctrl).await {
+            Ok(retired) => retired.expect("running checked by caller").revision.epoch,
+            Err(RetireFailure {
+                epoch: retired_epoch,
+                error,
+            }) => {
+                let _ = self.inner.store.cleanup_epoch(epoch).await;
+                if matches!(error, Error::StopUnconfirmed(_)) {
+                    return Err(self.latch_quarantine(ctrl, retired_epoch, error));
+                }
+                self.publish_terminal_error(&error);
+                return Err(error);
             }
-            self.publish_terminal_error(&error);
-            return Err(error);
-        }
+        };
         if let Err(error) = self.inner.store.cleanup_epoch(old_epoch).await {
             self.publish_terminal_error(&error);
             return Err(error);
@@ -212,40 +197,39 @@ impl CoreManager {
             }
         }
 
-        let old = ctrl.current.take().expect("running checked by caller");
-        abort_and_await(old.forwarder).await;
-        let old_epoch = old.instance.epoch();
-        if let Err(error) = old
-            .instance
-            .stop_and_confirm_dead(self.inner.options.stop_timeout)
-            .await
-        {
-            drop(full_staged);
-            let old_uncertain = matches!(error, Error::StopUnconfirmed(_));
-            let old_reason = error.to_string();
-            let new_stop = instance
-                .stop_and_confirm_dead(self.inner.options.stop_timeout)
-                .await;
-            match new_stop {
-                Ok(()) => {
-                    let _ = self.inner.store.cleanup_epoch(epoch).await;
-                    if old_uncertain {
-                        return Err(self.latch_quarantine(ctrl, old_epoch, error));
+        let old_epoch = match self.retire_current(ctrl).await {
+            Ok(retired) => retired.expect("running checked by caller").revision.epoch,
+            Err(RetireFailure {
+                epoch: retired_epoch,
+                error,
+            }) => {
+                drop(full_staged);
+                let old_uncertain = matches!(error, Error::StopUnconfirmed(_));
+                let old_reason = error.to_string();
+                let new_stop = instance
+                    .stop_and_confirm_dead(self.inner.options.stop_timeout)
+                    .await;
+                match new_stop {
+                    Ok(()) => {
+                        let _ = self.inner.store.cleanup_epoch(epoch).await;
+                        if old_uncertain {
+                            return Err(self.latch_quarantine(ctrl, retired_epoch, error));
+                        }
+                        self.publish_terminal_error(&error);
+                        return Err(error);
                     }
-                    self.publish_terminal_error(&error);
-                    return Err(error);
-                }
-                Err(new_error) => {
-                    if old_uncertain {
-                        record_quarantine(ctrl, old_epoch, old_reason);
+                    Err(new_error) => {
+                        if old_uncertain {
+                            record_quarantine(ctrl, retired_epoch, old_reason);
+                        }
+                        let error = Error::StopUnconfirmed(format!(
+                            "old epoch stop failed: {error}; new bootstrap stop also failed: {new_error}"
+                        ));
+                        return Err(self.latch_quarantine(ctrl, epoch, error));
                     }
-                    let error = Error::StopUnconfirmed(format!(
-                        "old epoch stop failed: {error}; new bootstrap stop also failed: {new_error}"
-                    ));
-                    return Err(self.latch_quarantine(ctrl, epoch, error));
                 }
             }
-        }
+        };
 
         let commit = match self.inner.store.commit_replace(full_staged, epoch).await {
             Ok(commit) => commit,
