@@ -93,7 +93,7 @@ impl CoreManager {
         snapshot: ConfigSnapshot,
         resolved: ResolvedFeatures,
     ) -> Result<(), Error> {
-        let epoch = self.next_epoch();
+        let epoch = ctrl.epochs.next();
         let plan = match self
             .prepare_launch_with_features(&spec, epoch, &snapshot, resolved)
             .await
@@ -143,7 +143,7 @@ impl CoreManager {
         resolved: ResolvedFeatures,
     ) -> Result<SwitchOutcome, Error> {
         let old_epoch = ctrl.current.as_ref().map(|active| active.instance.epoch());
-        let epoch = self.next_epoch();
+        let epoch = ctrl.epochs.next();
         let prepared = match self
             .prepare_graceful(&spec, epoch, &snapshot, resolved)
             .await

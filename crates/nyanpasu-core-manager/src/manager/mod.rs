@@ -8,10 +8,7 @@ mod quarantine;
 mod reconcile;
 mod switching;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 
 use enumset::EnumSet;
 use serde_yaml_ng::Mapping;
@@ -119,7 +116,6 @@ struct Inner {
     /// Outlives every epoch, so callers can subscribe before the first start and
     /// keep receiving across restarts and core switches.
     log_tx: broadcast::Sender<Arc<LogFrame>>,
-    epoch: AtomicU64,
     version_cache: VersionCache,
     /// `Some` while the JSONL sink is running. `None` means the caller turned it
     /// off, and there is deliberately no path to report — nothing will ever
@@ -134,14 +130,47 @@ struct Inner {
     _runtime_lock: RuntimeDirectoryLock,
 }
 
-#[derive(Default)]
 struct Ctrl {
+    epochs: EpochAllocator,
     current: Option<Active>,
     last_spec: Option<InstanceSpec>,
     quarantine: Vec<QuarantinedEpoch>,
     /// The persisted-and-live DNS override, when a controller is injected and
     /// an override is in place. Serialized by the control lock like the rest.
     dns_record: Option<DnsOverrideRecord>,
+}
+
+impl Ctrl {
+    fn new(max_epoch: u64) -> Self {
+        Self {
+            epochs: EpochAllocator::seeded(max_epoch),
+            current: None,
+            last_spec: None,
+            quarantine: Vec::new(),
+            dns_record: None,
+        }
+    }
+}
+
+/// Hands out epoch numbers: monotone for the manager's lifetime and seeded
+/// past every artifact found on disk, so a number is never reused within one
+/// runtime directory. It lives under the control lock because every allocation
+/// happens inside a control transaction, which is also why it is not atomic.
+/// Never returns 0, which is reserved for "no epoch"; exhausting 2^64 epochs in
+/// one directory is an invariant violation, not a wrap.
+struct EpochAllocator {
+    last: u64,
+}
+
+impl EpochAllocator {
+    fn seeded(max_seen: u64) -> Self {
+        Self { last: max_seen }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.last = self.last.checked_add(1).expect("epoch space exhausted");
+        self.last
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -323,10 +352,9 @@ impl CoreManager {
                 backend,
                 dns,
                 store,
-                ctrl: tokio::sync::Mutex::default(),
+                ctrl: tokio::sync::Mutex::new(Ctrl::new(max_epoch)),
                 status_tx,
                 log_tx,
-                epoch: AtomicU64::new(max_epoch),
                 version_cache: VersionCache::default(),
                 log_dir,
                 log_sink: tokio::sync::Mutex::new(log_sink),
@@ -377,7 +405,7 @@ impl CoreManager {
     }
 
     async fn start_locked(&self, ctrl: &mut Ctrl, spec: InstanceSpec) -> Result<(), Error> {
-        let epoch = self.next_epoch();
+        let epoch = ctrl.epochs.next();
         let snapshot = match ConfigSnapshot::load(&spec.config_path).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -581,10 +609,6 @@ impl CoreManager {
         result
     }
 
-    fn next_epoch(&self) -> u64 {
-        self.inner.epoch.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     async fn spawn_instance(&self, plan: &EpochPlan) -> Result<Box<dyn RuntimeInstance>, Error> {
         self.inner
             .backend
@@ -682,4 +706,23 @@ fn spawn_forwarder(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EpochAllocator;
+
+    #[test]
+    fn epochs_are_monotone_past_the_seed_and_never_zero() {
+        let mut fresh = EpochAllocator::seeded(0);
+        assert_eq!(fresh.next(), 1);
+        let mut seeded = EpochAllocator::seeded(7);
+        assert_eq!((seeded.next(), seeded.next()), (8, 9));
+    }
+
+    #[test]
+    #[should_panic(expected = "epoch space exhausted")]
+    fn epoch_exhaustion_is_an_invariant_violation_not_a_wrap() {
+        EpochAllocator::seeded(u64::MAX).next();
+    }
 }

@@ -386,7 +386,7 @@ impl CoreManager {
         input: InstanceSpec,
         snapshot: ConfigSnapshot,
     ) -> Result<ApplyOutcome, Error> {
-        let epoch = self.next_epoch();
+        let epoch = ctrl.epochs.next();
         let desired = self.prepare_launch(&input, epoch, &snapshot).await?;
         let old_plan = match self.retire_current(ctrl).await {
             Ok(retired) => retired.expect("current held by control lock"),
