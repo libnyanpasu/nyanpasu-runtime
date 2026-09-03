@@ -103,6 +103,7 @@ impl CoreManager {
             .current
             .as_ref()
             .expect("start_locked installed the active runtime")
+            .plan
             .revision
             .clone();
         Ok(ApplyOutcome::Started { revision })

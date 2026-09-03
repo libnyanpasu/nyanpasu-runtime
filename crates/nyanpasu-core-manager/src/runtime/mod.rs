@@ -28,6 +28,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// One live core runtime owned by the orchestrator. Every method mirrors the
 /// surface the orchestrator actually consumes; nothing here promises a PID or
 /// a process — `pid` is `None` for runtimes that have none.
+///
+/// `epoch`, `spec` and `controller` report the [`RuntimeLaunchRequest`] this
+/// runtime was launched from, unchanged. The orchestrator keeps its own copy
+/// of that request as the epoch's plan and relies on the two agreeing when it
+/// relaunches the same epoch on rollback.
 pub trait RuntimeInstance: Send + Sync {
     fn epoch(&self) -> u64;
 

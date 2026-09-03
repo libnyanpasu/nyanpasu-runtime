@@ -577,6 +577,26 @@ mod tests {
     }
 
     #[test]
+    fn mihomo_effective_controller_rewrite_switches() {
+        // Same guarantee as above for the kind that *can* reconcile in place:
+        // a controller the orchestrator rewrote is never patched or reloaded,
+        // so an epoch's plan and its live instance cannot disagree on it.
+        let spec = spec(CoreKind::Mihomo, "mihomo");
+        assert!(matches!(
+            classify(
+                &mapping("mixed-port: 7890"),
+                &mapping("external-controller: 127.0.0.1:9090"),
+                &spec,
+                &mapping("mixed-port: 7890"),
+                &mapping("external-controller-pipe: /tmp/core-1.sock"),
+                &spec,
+            )
+            .unwrap(),
+            ConfigChange::Switch
+        ));
+    }
+
+    #[test]
     fn controller_process_and_unsupported_core_changes_switch() {
         let current = spec(CoreKind::Mihomo, "mihomo");
         let mut changed_binary = current.clone();

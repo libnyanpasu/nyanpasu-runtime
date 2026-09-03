@@ -1,32 +1,25 @@
 use crate::{
-    Feature, RuntimeFeature,
     error::Error,
     runtime::RuntimeInstance,
-    spec::InstanceSpec,
     state::{
-        ConfigRevision, CoreState, CoreStatus, HealthStatus, InstanceState, InstanceStatus,
-        SpecSummary, StopReason, now_ms,
+        CoreState, CoreStatus, HealthStatus, InstanceState, InstanceStatus, SpecSummary,
+        StopReason, now_ms,
     },
 };
 
-use super::{Active, CoreManager, Ctrl, Inner};
+use super::{Active, CoreManager, Ctrl, EpochPlan, Inner};
 
 impl Inner {
-    pub(super) fn publish(
-        &self,
-        state: CoreState,
-        spec: Option<SpecSummary>,
-        controller: Option<clash_api::Host>,
-        revision: Option<ConfigRevision>,
-    ) {
+    /// `None` publishes a state with no epoch behind it (stopped, quarantined).
+    pub(super) fn publish(&self, state: CoreState, plan: Option<&EpochPlan>) {
         self.status_tx.send_modify(|status| {
             let lifecycle_changed = status.state != state;
             let health = default_health_for_state(status.health.as_ref(), &state);
             status.state = state;
             status.health = health;
-            status.spec = spec;
-            status.controller = controller;
-            status.revision = revision;
+            status.spec = plan.map(spec_summary);
+            status.controller = plan.map(|plan| plan.controller.host.clone());
+            status.revision = plan.map(|plan| plan.revision.clone());
             if lifecycle_changed {
                 status.changed_at = now_ms();
             }
@@ -34,33 +27,25 @@ impl Inner {
     }
 
     pub(super) fn publish_active(&self, active: &Active, state: CoreState) {
-        self.publish_instance(
-            active.instance.as_ref(),
-            state,
-            &active.source_spec,
-            &active.revision,
-            active.capabilities,
-            active.runtime_features,
-        );
+        self.publish_instance(active.instance.as_ref(), state, &active.plan);
     }
 
+    /// Health and controller still come from the live instance; the epoch's own
+    /// description comes from its plan.
     pub(super) fn publish_instance(
         &self,
         instance: &dyn RuntimeInstance,
         state: CoreState,
-        source_spec: &InstanceSpec,
-        revision: &ConfigRevision,
-        capabilities: enumset::EnumSet<Feature>,
-        runtime_features: enumset::EnumSet<RuntimeFeature>,
+        plan: &EpochPlan,
     ) {
         let health = instance.state().borrow().health.clone();
         self.status_tx.send_modify(|status| {
             let lifecycle_changed = status.state != state;
             status.state = state;
             status.health = health;
-            status.spec = Some(spec_summary(source_spec, capabilities, runtime_features));
+            status.spec = Some(spec_summary(plan));
             status.controller = Some(instance.controller().host.clone());
-            status.revision = Some(revision.clone());
+            status.revision = Some(plan.revision.clone());
             if lifecycle_changed {
                 status.changed_at = now_ms();
             }
@@ -113,16 +98,12 @@ fn apply_epoch_status(status: &mut CoreStatus, epoch: u64, instance: &InstanceSt
     true
 }
 
-pub(super) fn spec_summary(
-    spec: &InstanceSpec,
-    capabilities: enumset::EnumSet<Feature>,
-    runtime_features: enumset::EnumSet<RuntimeFeature>,
-) -> SpecSummary {
+fn spec_summary(plan: &EpochPlan) -> SpecSummary {
     SpecSummary {
-        kind: spec.core.kind,
-        config_path: spec.config_path.clone(),
-        capabilities: capabilities.iter().collect(),
-        runtime_features: runtime_features.iter().collect(),
+        kind: plan.source_spec.core.kind,
+        config_path: plan.source_spec.config_path.clone(),
+        capabilities: plan.capabilities.iter().collect(),
+        runtime_features: plan.runtime_features.iter().collect(),
     }
 }
 
@@ -132,8 +113,6 @@ impl CoreManager {
             CoreState::Stopped {
                 reason: Some(StopReason::Error(error.to_string())),
             },
-            None,
-            None,
             None,
         );
     }

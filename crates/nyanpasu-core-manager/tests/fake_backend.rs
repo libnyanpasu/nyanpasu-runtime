@@ -18,7 +18,7 @@ use nyanpasu_core_manager::{
     spec::{InstanceSpec, ResolvedController},
     state::{InstanceState, InstanceStatus, StopReason},
 };
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 #[derive(Default)]
 struct FakeBackend {
@@ -163,6 +163,35 @@ fn reconcile_envelope(dir: &camino::Utf8Path, binary: camino::Utf8PathBuf) -> Co
             expected_applied: None,
         })),
     }
+}
+
+/// The orchestrator treats an epoch's plan as the authority on what that epoch
+/// was launched with, which only holds while instances echo their launch
+/// request verbatim (see [`RuntimeInstance`]).
+#[tokio::test]
+async fn the_fake_instance_echoes_its_launch_request() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let spec = common::mihomo_spec(&dir, dir.join("unused.yaml"));
+    let controller = ResolvedController {
+        host: clash_api::Host::http("127.0.0.1:9090").unwrap(),
+        secret: None,
+    };
+    let (expected_spec, expected_controller) = (format!("{spec:?}"), format!("{controller:?}"));
+    let (log_tx, _) = broadcast::channel(8);
+
+    let instance = FakeBackend::default()
+        .launch(RuntimeLaunchRequest {
+            effective_spec: spec,
+            epoch: 7,
+            controller,
+            log_tx,
+        })
+        .await
+        .expect("launch");
+
+    assert_eq!(instance.epoch(), 7);
+    assert_eq!(format!("{:?}", instance.spec()), expected_spec);
+    assert_eq!(format!("{:?}", instance.controller()), expected_controller);
 }
 
 #[tokio::test]

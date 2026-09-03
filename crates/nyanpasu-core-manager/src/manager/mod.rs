@@ -35,7 +35,7 @@ use crate::{
     state::{ConfigRevision, CoreState, CoreStatus, InstanceStatus, StopReason},
 };
 
-use publish::{instance_core_state, spec_summary};
+use publish::instance_core_state;
 use quarantine::{reject_quarantine, sweep_orphans};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,18 +151,12 @@ struct QuarantinedEpoch {
     death_proven: bool,
 }
 
-struct Active {
-    instance: Box<dyn RuntimeInstance>,
-    forwarder: tokio::task::JoinHandle<()>,
-    source_spec: InstanceSpec,
-    revision: ConfigRevision,
-    capabilities: EnumSet<Feature>,
-    runtime_features: EnumSet<RuntimeFeature>,
-    source_document: Mapping,
-    effective_document: Mapping,
-}
-
-struct PreparedLaunch {
+/// Everything the manager knows about one epoch besides the live process.
+/// Built once by a prepare step, carried whole into [`Active`], and reused
+/// verbatim to relaunch the same epoch on rollback. Deliberately not `Clone`:
+/// every consumer moves or borrows it; a clone would be two sources of truth
+/// for one epoch.
+struct EpochPlan {
     source_spec: InstanceSpec,
     effective_spec: InstanceSpec,
     controller: ResolvedController,
@@ -173,21 +167,20 @@ struct PreparedLaunch {
     effective_document: Mapping,
 }
 
+struct Active {
+    instance: Box<dyn RuntimeInstance>,
+    forwarder: tokio::task::JoinHandle<()>,
+    plan: EpochPlan,
+}
+
 struct PreparedGraceful {
-    launch: PreparedLaunch,
+    plan: EpochPlan,
     full_staged: StagedRuntimeConfig,
     restoration: Option<(Box<clash_api::ConfigPatch>, mihomo::RuntimeProjection)>,
 }
 
 struct PreparedApply {
-    source_spec: InstanceSpec,
-    effective_spec: InstanceSpec,
-    controller: ResolvedController,
-    revision: ConfigRevision,
-    capabilities: EnumSet<Feature>,
-    runtime_features: EnumSet<RuntimeFeature>,
-    source_document: Mapping,
-    effective_document: Mapping,
+    plan: EpochPlan,
     staged: StagedRuntimeConfig,
 }
 
@@ -408,22 +401,11 @@ impl CoreManager {
         self.start_prepared(ctrl, prepared).await
     }
 
-    async fn start_prepared(&self, ctrl: &mut Ctrl, prepared: PreparedLaunch) -> Result<(), Error> {
-        let epoch = prepared.revision.epoch;
-        self.inner.publish(
-            CoreState::Starting { epoch },
-            Some(spec_summary(
-                &prepared.source_spec,
-                prepared.capabilities,
-                prepared.runtime_features,
-            )),
-            Some(prepared.controller.host.clone()),
-            Some(prepared.revision.clone()),
-        );
-        let instance = match self
-            .spawn_instance(prepared.effective_spec, epoch, prepared.controller)
-            .await
-        {
+    async fn start_prepared(&self, ctrl: &mut Ctrl, plan: EpochPlan) -> Result<(), Error> {
+        let epoch = plan.revision.epoch;
+        self.inner
+            .publish(CoreState::Starting { epoch }, Some(&plan));
+        let instance = match self.spawn_instance(&plan).await {
             Ok(instance) => instance,
             Err(error) => {
                 let _ = self.inner.store.cleanup_epoch(epoch).await;
@@ -452,25 +434,14 @@ impl CoreManager {
         }
 
         let pid = instance.pid().unwrap_or_default();
-        self.inner.publish_instance(
-            instance.as_ref(),
-            CoreState::Running { epoch, pid },
-            &prepared.source_spec,
-            &prepared.revision,
-            prepared.capabilities,
-            prepared.runtime_features,
-        );
+        self.inner
+            .publish_instance(instance.as_ref(), CoreState::Running { epoch, pid }, &plan);
         let forwarder = spawn_forwarder(&self.inner, instance.state(), epoch);
-        ctrl.last_spec = Some(prepared.source_spec.clone());
+        ctrl.last_spec = Some(plan.source_spec.clone());
         ctrl.current = Some(Active {
             instance,
             forwarder,
-            source_spec: prepared.source_spec,
-            revision: prepared.revision,
-            capabilities: prepared.capabilities,
-            runtime_features: prepared.runtime_features,
-            source_document: prepared.source_document,
-            effective_document: prepared.effective_document,
+            plan,
         });
         Ok(())
     }
@@ -490,11 +461,7 @@ impl CoreManager {
         let Active {
             instance,
             forwarder,
-            source_spec,
-            revision,
-            capabilities,
-            runtime_features,
-            ..
+            plan,
         } = active;
         let captured_status = instance.state().borrow().clone();
         abort_and_await(forwarder).await;
@@ -502,9 +469,7 @@ impl CoreManager {
             let epoch = instance.epoch();
             self.inner.publish(
                 instance_core_state(epoch, &captured_status.state),
-                Some(spec_summary(&source_spec, capabilities, runtime_features)),
-                Some(instance.controller().host.clone()),
-                Some(revision),
+                Some(&plan),
             );
             if let Err(error) = instance
                 .stop_and_confirm_dead(self.inner.options.stop_timeout)
@@ -522,12 +487,8 @@ impl CoreManager {
             return Err(Error::NotStarted);
         }
         let epoch = instance.epoch();
-        self.inner.publish(
-            CoreState::Stopping { epoch },
-            Some(spec_summary(&source_spec, capabilities, runtime_features)),
-            Some(instance.controller().host.clone()),
-            Some(revision),
-        );
+        self.inner
+            .publish(CoreState::Stopping { epoch }, Some(&plan));
         if let Err(error) = instance
             .stop_and_confirm_dead(self.inner.options.stop_timeout)
             .await
@@ -546,8 +507,6 @@ impl CoreManager {
             CoreState::Stopped {
                 reason: Some(StopReason::User),
             },
-            None,
-            None,
             None,
         );
         Ok(())
@@ -596,20 +555,12 @@ impl CoreManager {
                 let Active {
                     instance,
                     forwarder,
-                    source_spec,
-                    revision,
-                    capabilities,
-                    runtime_features,
-                    ..
+                    plan,
                 } = active;
                 abort_and_await(forwarder).await;
                 let epoch = instance.epoch();
-                self.inner.publish(
-                    CoreState::Stopping { epoch },
-                    Some(spec_summary(&source_spec, capabilities, runtime_features)),
-                    Some(instance.controller().host.clone()),
-                    Some(revision),
-                );
+                self.inner
+                    .publish(CoreState::Stopping { epoch }, Some(&plan));
                 if let Err(error) = instance
                     .stop_and_confirm_dead(self.inner.options.stop_timeout)
                     .await
@@ -629,8 +580,6 @@ impl CoreManager {
                         reason: Some(StopReason::User),
                     },
                     None,
-                    None,
-                    None,
                 );
             }
             Ok(())
@@ -647,18 +596,13 @@ impl CoreManager {
         self.inner.epoch.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    async fn spawn_instance(
-        &self,
-        effective_spec: InstanceSpec,
-        epoch: u64,
-        controller: ResolvedController,
-    ) -> Result<Box<dyn RuntimeInstance>, Error> {
+    async fn spawn_instance(&self, plan: &EpochPlan) -> Result<Box<dyn RuntimeInstance>, Error> {
         self.inner
             .backend
             .launch(RuntimeLaunchRequest {
-                effective_spec,
-                epoch,
-                controller,
+                effective_spec: plan.effective_spec.clone(),
+                epoch: plan.revision.epoch,
+                controller: plan.controller.clone(),
                 log_tx: self.inner.log_tx.clone(),
             })
             .await

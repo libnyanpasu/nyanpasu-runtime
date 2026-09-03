@@ -33,8 +33,12 @@ async fn start_confirms_via_version_probe() {
         &format!("external-controller: 127.0.0.1:{port}\nx-fake-core:\n  ready-delay-ms: 300\n"),
     );
     let spec = common::mihomo_spec(&dir, config);
+    let controller = http_controller(port);
+    // The orchestrator keeps its own copy of the launch request as the epoch's
+    // plan; the two only stay interchangeable while the instance echoes it.
+    let (expected_spec, expected_controller) = (format!("{spec:?}"), format!("{controller:?}"));
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
+    let instance = Instance::spawn(spec, 1, controller, CancellationToken::new())
         .await
         .expect("spawn");
     let (recorder, log) = common::record_states(instance.state());
@@ -45,6 +49,8 @@ async fn start_confirms_via_version_probe() {
         InstanceState::Running { pid } if pid > 0
     ));
     assert_eq!(instance.epoch(), 1);
+    assert_eq!(format!("{:?}", instance.spec()), expected_spec);
+    assert_eq!(format!("{:?}", instance.controller()), expected_controller);
 
     instance.stop().await.expect("stop");
     recorder.abort();
