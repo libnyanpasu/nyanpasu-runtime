@@ -1,5 +1,5 @@
 use crate::{
-    RuntimeFeature,
+    Epoch, RuntimeFeature,
     capability::ResolvedFeatures,
     config::{
         ConfigSnapshot,
@@ -341,7 +341,7 @@ impl CoreManager {
     pub(super) async fn prepare_launch(
         &self,
         spec: &InstanceSpec,
-        epoch: u64,
+        epoch: Epoch,
         snapshot: &ConfigSnapshot,
     ) -> Result<EpochPlan, Error> {
         self.validate_launchable(spec).await?;
@@ -353,7 +353,7 @@ impl CoreManager {
     async fn prepare_launch_with_features(
         &self,
         spec: &InstanceSpec,
-        epoch: u64,
+        epoch: Epoch,
         snapshot: &ConfigSnapshot,
         resolved: ResolvedFeatures,
     ) -> Result<EpochPlan, Error> {
@@ -400,7 +400,7 @@ impl CoreManager {
     async fn prepare_graceful(
         &self,
         spec: &InstanceSpec,
-        epoch: u64,
+        epoch: Epoch,
         snapshot: &ConfigSnapshot,
         resolved: ResolvedFeatures,
     ) -> Result<PreparedGraceful, Error> {

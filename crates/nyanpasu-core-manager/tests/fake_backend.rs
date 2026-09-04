@@ -11,8 +11,8 @@ use std::sync::{
 
 use nyanpasu_core_manager::{
     ConfigInput, ControlOptions, CoreCommand, CoreCommandEnvelope, CoreControl, CoreErrorKind,
-    Error, ManagerOptions, OperationId, OperationOutput, OperationState, ProbePhase, ProbeResult,
-    ReconcileRequest,
+    Epoch, Error, ManagerOptions, OperationId, OperationOutput, OperationState, ProbePhase,
+    ProbeResult, ReconcileRequest,
     manager::{ApplyOutcome, CoreManager},
     runtime::{BoxFuture, RuntimeBackend, RuntimeInstance, RuntimeLaunchRequest},
     spec::{InstanceSpec, ResolvedController},
@@ -23,7 +23,7 @@ use tokio::sync::{Notify, broadcast, watch};
 #[derive(Default)]
 struct FakeBackend {
     refuse_stop: Arc<AtomicBool>,
-    launched_epochs: Mutex<Vec<u64>>,
+    launched_epochs: Mutex<Vec<Epoch>>,
     /// Holds the first launch inside the executor so a test can fill the queue
     /// behind a transaction that is provably running.
     gate_launch: AtomicBool,
@@ -73,14 +73,14 @@ impl RuntimeBackend for FakeBackend {
 
 struct FakeInstance {
     spec: InstanceSpec,
-    epoch: u64,
+    epoch: Epoch,
     controller: ResolvedController,
     state_tx: watch::Sender<InstanceStatus>,
     refuse_stop: Arc<AtomicBool>,
 }
 
 impl RuntimeInstance for FakeInstance {
-    fn epoch(&self) -> u64 {
+    fn epoch(&self) -> Epoch {
         self.epoch
     }
 
@@ -182,14 +182,14 @@ async fn the_fake_instance_echoes_its_launch_request() {
     let instance = FakeBackend::default()
         .launch(RuntimeLaunchRequest {
             effective_spec: spec,
-            epoch: 7,
+            epoch: common::epoch(7),
             controller,
             log_tx,
         })
         .await
         .expect("launch");
 
-    assert_eq!(instance.epoch(), 7);
+    assert_eq!(instance.epoch(), common::epoch(7));
     assert_eq!(format!("{:?}", instance.spec()), expected_spec);
     assert_eq!(format!("{:?}", instance.controller()), expected_controller);
 }
@@ -230,7 +230,10 @@ async fn the_whole_lifecycle_runs_without_a_single_process() {
         ),
         "expected a switch, got {output:?}"
     );
-    assert_eq!(*backend.launched_epochs.lock().unwrap(), vec![1, 2]);
+    assert_eq!(
+        *backend.launched_epochs.lock().unwrap(),
+        vec![common::epoch(1), common::epoch(2)]
+    );
 
     let output = control
         .submit(CoreCommandEnvelope {

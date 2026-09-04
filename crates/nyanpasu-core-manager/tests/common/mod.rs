@@ -8,12 +8,20 @@ use std::{sync::Arc, time::Duration};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
-    CoreKind, CoreSpec, HealthPolicy, InstanceOptions, InstanceSpec,
+    CoreKind, CoreSpec, Epoch, HealthPolicy, InstanceOptions, InstanceSpec,
     state::{HealthState, InstanceState, InstanceStatus},
 };
 use nyanpasu_utils::process::{Backoff, RestartPolicy};
 use parking_lot::Mutex;
 use tokio::sync::watch;
+
+/// The epoch a test means when it writes a number. Deliberately not a
+/// `From<u64>` on the type itself: production code must keep paying the
+/// nonzero check at every boundary, and a test that skips it stops exercising
+/// the barrier it is meant to prove.
+pub fn epoch(value: u64) -> Epoch {
+    Epoch::new(value).expect("a test epoch must be nonzero")
+}
 
 pub fn fake_core_bin() -> Utf8PathBuf {
     Utf8PathBuf::from(env!("CARGO_BIN_EXE_nyanpasu-fake-core"))

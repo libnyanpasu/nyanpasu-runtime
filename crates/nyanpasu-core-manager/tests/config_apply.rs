@@ -10,8 +10,8 @@ use std::{
 };
 
 use nyanpasu_core_manager::{
-    ApplyOutcome, ControllerVersionProbe, CoreManager, CoreState, Error, HealthProbe, InstanceSpec,
-    LocalIpcPolicy, ManagerOptions, ProbeHandle, ProbePhase, ProbeResult, RevisionId,
+    ApplyOutcome, ControllerVersionProbe, CoreManager, CoreState, Epoch, Error, HealthProbe,
+    InstanceSpec, LocalIpcPolicy, ManagerOptions, ProbeHandle, ProbePhase, ProbeResult, RevisionId,
 };
 use parking_lot::Mutex;
 
@@ -32,7 +32,7 @@ fn write_named(dir: &camino::Utf8Path, name: &str, body: &str) -> camino::Utf8Pa
     path
 }
 
-fn running(manager: &CoreManager) -> (u64, u32) {
+fn running(manager: &CoreManager) -> (Epoch, u32) {
     match manager.status().state {
         CoreState::Running { epoch, pid } => (epoch, pid),
         state => panic!("expected running, got {state:?}"),
@@ -61,13 +61,13 @@ async fn custom_probe_plan_reaches_desired_replacement_and_rollback() {
         "probe-desired.yaml",
         &http_controller_yaml(port, "x-setting: desired\n"),
     );
-    let attempts = Arc::new(Mutex::new(Vec::<(u64, u32)>::new()));
+    let attempts = Arc::new(Mutex::new(Vec::<(Epoch, u32)>::new()));
     let readiness = ProbeHandle::from_fn("recorded-readiness", {
         let attempts = attempts.clone();
         move |context| {
             attempts.lock().push((context.epoch, context.pid));
             async move {
-                if context.epoch == 2 {
+                if context.epoch == common::epoch(2) {
                     return ProbeResult::Unhealthy {
                         detail: Some("reject desired epoch".into()),
                     };
@@ -100,11 +100,11 @@ async fn custom_probe_plan_reaches_desired_replacement_and_rollback() {
         (
             attempts
                 .iter()
-                .filter_map(|(epoch, pid)| (*epoch == 1).then_some(*pid))
+                .filter_map(|(observed, pid)| (*observed == common::epoch(1)).then_some(*pid))
                 .collect(),
             attempts
                 .iter()
-                .filter_map(|(epoch, pid)| (*epoch == 2).then_some(*pid))
+                .filter_map(|(observed, pid)| (*observed == common::epoch(2)).then_some(*pid))
                 .collect(),
         )
     };
@@ -646,11 +646,11 @@ async fn patch_success_with_get_mismatch_restarts_desired() {
 #[test]
 fn revision_id_is_an_explicit_cas_token() {
     let token = RevisionId {
-        epoch: 4,
+        epoch: common::epoch(4),
         generation: 8,
         effective_hash: "hash".into(),
     };
-    assert_eq!(token.epoch, 4);
+    assert_eq!(token.epoch, common::epoch(4));
 }
 
 #[tokio::test]

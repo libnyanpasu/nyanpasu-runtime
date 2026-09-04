@@ -121,7 +121,7 @@ impl CoreManager {
                 .as_ref()
                 .map_or_else(Vec::new, |(_, previous)| previous.clone()),
             applied: intent.servers.clone(),
-            runtime_epoch: epoch,
+            runtime_epoch: epoch.get(),
             owner_generation: None,
             state: DnsOverrideState::Applied,
         };
