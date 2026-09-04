@@ -84,7 +84,7 @@ impl CoreManager {
             let running = !active.instance.state().borrow().state.is_terminal();
             running
                 .then(|| {
-                    dns.desired(&active.effective_document)
+                    dns.desired(&active.plan.effective_document)
                         .map(|intent| (intent, active.instance.epoch()))
                 })
                 .flatten()

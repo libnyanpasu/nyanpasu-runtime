@@ -446,6 +446,73 @@ async fn failed_desired_restart_restores_and_restarts_the_old_revision() {
 }
 
 #[tokio::test]
+async fn failed_restart_after_an_in_place_apply_rolls_back_to_the_latest_generation() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let port = common::free_port();
+    // The behavior block is identical in all three configs; changing it would
+    // classify as a switch. `patch-no-effect` keeps the final apply from
+    // reconciling in place, so it falls back to the restart path, and
+    // `allow-lan` makes that replacement fail to start.
+    let behavior = "x-fake-core:\n  patch-no-effect: true\n  fail-start-when-allow-lan: true\n";
+    let first = write_named(&dir, "first.yaml", &http_controller_yaml(port, behavior));
+    let second = write_named(
+        &dir,
+        "second.yaml",
+        &http_controller_yaml(port, &format!("rules:\n  - MATCH,DIRECT\n{behavior}")),
+    );
+    let desired = write_named(
+        &dir,
+        "desired.yaml",
+        &http_controller_yaml(
+            port,
+            &format!("allow-lan: true\nrules:\n  - MATCH,DIRECT\n{behavior}"),
+        ),
+    );
+    let manager = manager(&dir, Duration::from_secs(1)).await;
+    manager.start(spec(&dir, first)).await.expect("start");
+    let (epoch, _) = running(&manager);
+
+    let reloaded = manager
+        .apply_config(spec(&dir, second), None)
+        .await
+        .expect("reload");
+    assert!(
+        matches!(reloaded, ApplyOutcome::Reloaded { .. }),
+        "got {reloaded:?}"
+    );
+    let generation_two = manager.status().revision.expect("reloaded revision");
+    assert_eq!(generation_two.generation, 2);
+
+    let outcome = manager
+        .apply_config(spec(&dir, desired), None)
+        .await
+        .expect("rollback succeeds");
+
+    let ApplyOutcome::RolledBack { revision, .. } = outcome else {
+        panic!("expected RolledBack, got {outcome:?}")
+    };
+    // Not generation 1: the rollback relaunches the whole plan the last
+    // successful in-place apply left behind.
+    assert_eq!(revision, generation_two);
+    let restored: serde_yaml_ng::Mapping =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&revision.runtime_path).unwrap()).unwrap();
+    assert!(
+        restored
+            .get(serde_yaml_ng::Value::String("rules".into()))
+            .is_some(),
+        "generation 2 was not the restored runtime config"
+    );
+    assert_ne!(
+        restored
+            .get(serde_yaml_ng::Value::String("allow-lan".into()))
+            .and_then(serde_yaml_ng::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(running(&manager).0, epoch);
+    manager.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn desired_and_rollback_commits_preserve_both_durability_warnings() {
     let (_guard, dir) = common::utf8_tempdir();
     let port = common::free_port();

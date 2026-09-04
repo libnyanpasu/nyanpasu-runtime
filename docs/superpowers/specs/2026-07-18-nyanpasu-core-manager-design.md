@@ -259,7 +259,7 @@ impl CoreManager {
 ```
 
 - 控制面方法由一把 async Mutex 串行化;`switch` 进行中到达的控制命令排队等待。
-- **epoch**:`AtomicU64` 自增,0 保留表示"无"。进程内单调即满足路径唯一性(named pipe 随 server 关闭消失;unix socket 残留文件由启动清扫处理)。
+- **epoch**:控制锁内的单调分配器(`EpochAllocator`),由控制面 Mutex 串行化,0 保留表示"无"。进程内单调即满足路径唯一性(named pipe 随 server 关闭消失;unix socket 残留文件由启动清扫处理)。
 - 状态聚合:manager 的转发 task 订阅当前 Instance 的 `watch<InstanceState>`,映射为 `CoreState`(补 epoch)写入对外 watch;切换流程期间由流程直接发布 `Switching`。
 - `stop` 后 manager 保留 last spec(旧实现同语义:stop 后可 restart)。
 

@@ -18,7 +18,7 @@ use nyanpasu_core_manager::{
     spec::{InstanceSpec, ResolvedController},
     state::{InstanceState, InstanceStatus, StopReason},
 };
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, broadcast, watch};
 
 #[derive(Default)]
 struct FakeBackend {
@@ -165,6 +165,35 @@ fn reconcile_envelope(dir: &camino::Utf8Path, binary: camino::Utf8PathBuf) -> Co
     }
 }
 
+/// The orchestrator treats an epoch's plan as the authority on what that epoch
+/// was launched with, which only holds while instances echo their launch
+/// request verbatim (see [`RuntimeInstance`]).
+#[tokio::test]
+async fn the_fake_instance_echoes_its_launch_request() {
+    let (_guard, dir) = common::utf8_tempdir();
+    let spec = common::mihomo_spec(&dir, dir.join("unused.yaml"));
+    let controller = ResolvedController {
+        host: clash_api::Host::http("127.0.0.1:9090").unwrap(),
+        secret: None,
+    };
+    let (expected_spec, expected_controller) = (format!("{spec:?}"), format!("{controller:?}"));
+    let (log_tx, _) = broadcast::channel(8);
+
+    let instance = FakeBackend::default()
+        .launch(RuntimeLaunchRequest {
+            effective_spec: spec,
+            epoch: 7,
+            controller,
+            log_tx,
+        })
+        .await
+        .expect("launch");
+
+    assert_eq!(instance.epoch(), 7);
+    assert_eq!(format!("{:?}", instance.spec()), expected_spec);
+    assert_eq!(format!("{:?}", instance.controller()), expected_controller);
+}
+
 #[tokio::test]
 async fn the_whole_lifecycle_runs_without_a_single_process() {
     let (_guard, dir) = common::utf8_tempdir();
@@ -250,6 +279,13 @@ async fn an_unproven_stop_quarantines_and_blocks_every_mutation() {
         .await
         .unwrap_err();
     assert_eq!(error.kind, Some(CoreErrorKind::StopUnconfirmed));
+    // The switch had already committed a runtime config for its candidate
+    // epoch. That candidate is discarded before the quarantine latch, so an
+    // unprovable stop of the *old* epoch leaves no half-built epoch behind.
+    assert!(
+        !dir.join("runtime").join("config-2.yaml").exists(),
+        "the rejected candidate epoch's runtime config survived the failed switch"
+    );
 
     // No StopProof → no next owner: every further mutation is refused.
     let error = control
