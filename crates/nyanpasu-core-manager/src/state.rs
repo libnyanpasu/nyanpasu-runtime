@@ -2,7 +2,7 @@
 
 use camino::Utf8PathBuf;
 
-use crate::{Feature, RuntimeFeature, kind::CoreKind};
+use crate::{Epoch, Feature, RuntimeFeature, kind::CoreKind};
 
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,23 +110,23 @@ pub enum CoreState {
         reason: Option<StopReason>,
     },
     Starting {
-        epoch: u64,
+        epoch: Epoch,
     },
     Running {
-        epoch: u64,
+        epoch: Epoch,
         pid: u32,
     },
     Restarting {
-        epoch: u64,
+        epoch: Epoch,
         attempt: u32,
     },
     /// A hard or graceful switch is in flight.
     Switching {
-        from: Option<u64>,
-        to: u64,
+        from: Option<Epoch>,
+        to: Epoch,
     },
     Stopping {
-        epoch: u64,
+        epoch: Epoch,
     },
 }
 
@@ -142,7 +142,7 @@ pub struct SpecSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigRevision {
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub generation: u64,
     pub source_hash: String,
     pub effective_hash: String,
@@ -151,7 +151,7 @@ pub struct ConfigRevision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevisionId {
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub generation: u64,
     pub effective_hash: String,
 }

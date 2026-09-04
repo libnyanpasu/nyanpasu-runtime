@@ -19,6 +19,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    epoch::Epoch,
     error::Error,
     health::{
         HealthTracker, TrackerState,
@@ -39,7 +40,7 @@ const LOG_TAIL_FRAMES: usize = 32;
 /// One epoch of a running core. The spec is immutable; a config change means a
 /// new `Instance` with a new epoch (created by `CoreManager`).
 pub struct Instance {
-    epoch: u64,
+    epoch: Epoch,
     spec: Arc<InstanceSpec>,
     controller: Arc<ResolvedController>,
     state_rx: watch::Receiver<InstanceStatus>,
@@ -136,7 +137,7 @@ struct ProbeNowRequest {
 
 pub struct InstanceBuilder {
     spec: InstanceSpec,
-    epoch: u64,
+    epoch: Epoch,
     controller: ResolvedController,
     parent: CancellationToken,
     readiness_probe: Option<ProbeHandle>,
@@ -148,7 +149,7 @@ pub struct InstanceBuilder {
 impl Instance {
     pub fn builder(
         spec: InstanceSpec,
-        epoch: u64,
+        epoch: Epoch,
         controller: ResolvedController,
         parent: CancellationToken,
     ) -> InstanceBuilder {
@@ -166,7 +167,7 @@ impl Instance {
 
     pub async fn spawn(
         spec: InstanceSpec,
-        epoch: u64,
+        epoch: Epoch,
         controller: ResolvedController,
         parent: CancellationToken,
     ) -> Result<Instance, Error> {
@@ -215,7 +216,7 @@ impl Instance {
             state_tx,
             user_stop: AtomicBool::new(false),
             probe_timeout: AtomicBool::new(false),
-            parser: parking_lot::Mutex::new(LogParser::new(spec.core.kind, epoch)),
+            parser: parking_lot::Mutex::new(LogParser::new(spec.core.kind, epoch.get())),
             log_tail: parking_lot::Mutex::new(VecDeque::with_capacity(LOG_TAIL_FRAMES)),
             log_tx: log_tx.unwrap_or_else(|| broadcast::channel(LOG_CHANNEL_CAPACITY).0),
             cancel: cancel.clone(),
@@ -290,7 +291,7 @@ impl Instance {
         self.shared.log_tx.subscribe()
     }
 
-    pub fn epoch(&self) -> u64 {
+    pub fn epoch(&self) -> Epoch {
         self.epoch
     }
 
@@ -499,7 +500,7 @@ impl Drop for Instance {
     }
 }
 
-fn build_command(spec: &InstanceSpec, epoch: u64, controller: &ResolvedController) -> Command {
+fn build_command(spec: &InstanceSpec, epoch: Epoch, controller: &ResolvedController) -> Command {
     let mut args = kind::run_args(spec.core.kind, &spec.working_dir, &spec.config_path)
         .expect("kind validated in Instance::spawn");
     args.extend(kind::controller_args(spec.core.kind, &controller.host));
@@ -519,7 +520,7 @@ fn build_command(spec: &InstanceSpec, epoch: u64, controller: &ResolvedControlle
         command = if epoch_pid_path(spec, epoch).is_some() {
             command.epoch_pid_file(EpochPidFile::new(
                 pid_file.as_std_path(),
-                epoch,
+                epoch.get(),
                 spec.config_path.as_std_path(),
             ))
         } else {
@@ -529,7 +530,7 @@ fn build_command(spec: &InstanceSpec, epoch: u64, controller: &ResolvedControlle
     command
 }
 
-fn epoch_pid_path(spec: &InstanceSpec, epoch: u64) -> Option<&camino::Utf8Path> {
+fn epoch_pid_path(spec: &InstanceSpec, epoch: Epoch) -> Option<&camino::Utf8Path> {
     let pid_file = spec.pid_file.as_deref()?;
     let expected_pid = format!("core-{epoch}.pid");
     let expected_config = format!("config-{epoch}.yaml");
@@ -551,7 +552,7 @@ struct RunState {
 async fn monitor_loop(
     mut events: mpsc::UnboundedReceiver<SupervisorEvent>,
     shared: Arc<Shared>,
-    epoch: u64,
+    epoch: Epoch,
     options: InstanceOptions,
     controller: Arc<ResolvedController>,
     readiness_probe: ProbeHandle,
@@ -739,7 +740,7 @@ async fn apply_probe_observation(
     initial_deadline: Instant,
     shared: &Shared,
     driver: Option<&ProbeDriver>,
-    epoch: u64,
+    epoch: Epoch,
 ) -> bool {
     let Some(run) = current.as_mut() else {
         return false;
@@ -756,7 +757,7 @@ async fn apply_probe_observation(
     }
 
     tracing::trace!(
-        epoch,
+        epoch = epoch.get(),
         run_id = observation.run_id,
         pid = observation.pid,
         phase = ?observation.phase,
@@ -811,7 +812,7 @@ async fn drain_probe_observations(
     initial_deadline: Instant,
     shared: &Shared,
     driver: Option<&ProbeDriver>,
-    epoch: u64,
+    epoch: Epoch,
 ) -> bool {
     while let Ok(observation) = observations.try_recv() {
         let became_ready = apply_probe_observation(
@@ -901,6 +902,7 @@ fn publish_terminal(shared: &Shared, last_exit: Option<&TerminatedPayload>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::epoch::epoch;
     use std::time::Duration;
 
     use super::*;
@@ -1072,7 +1074,7 @@ mod tests {
                 initial_deadline,
                 &shared,
                 None,
-                1,
+                epoch(1),
             )
             .await
         );

@@ -14,6 +14,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, watch};
 
 use crate::{
+    epoch::Epoch,
     error::Error,
     log::LogFrame,
     probe::{ProbePhase, ProbeResult},
@@ -34,7 +35,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// of that request as the epoch's plan and relies on the two agreeing when it
 /// relaunches the same epoch on rollback.
 pub trait RuntimeInstance: Send + Sync {
-    fn epoch(&self) -> u64;
+    fn epoch(&self) -> Epoch;
 
     fn spec(&self) -> &InstanceSpec;
 
@@ -67,7 +68,7 @@ pub trait RuntimeInstance: Send + Sync {
 /// every epoch.
 pub struct RuntimeLaunchRequest {
     pub effective_spec: InstanceSpec,
-    pub epoch: u64,
+    pub epoch: Epoch,
     pub controller: ResolvedController,
     pub log_tx: broadcast::Sender<Arc<LogFrame>>,
 }

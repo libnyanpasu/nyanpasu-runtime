@@ -15,7 +15,7 @@ use serde_yaml_ng::Mapping;
 use tokio::sync::{broadcast, watch};
 
 use crate::{
-    Feature, RuntimeFeature,
+    Epoch, Feature, RuntimeFeature,
     capability::{ResolvedFeatures, VersionCache},
     config::{self, ConfigSnapshot, mihomo},
     dns::{DnsController, DnsOverrideRecord},
@@ -167,15 +167,15 @@ impl EpochAllocator {
         Self { last: max_seen }
     }
 
-    fn next(&mut self) -> u64 {
+    fn next(&mut self) -> Epoch {
         self.last = self.last.checked_add(1).expect("epoch space exhausted");
-        self.last
+        Epoch::new(self.last).expect("a checked increment cannot produce zero")
     }
 }
 
 #[derive(Debug, Clone)]
 struct QuarantinedEpoch {
-    epoch: u64,
+    epoch: Epoch,
     reason: String,
     death_proven: bool,
 }
@@ -207,7 +207,7 @@ struct Active {
 /// latch quarantine — differs per transaction and stays with the caller, in the
 /// order that caller already has.
 struct RetireFailure {
-    epoch: u64,
+    epoch: Epoch,
     error: Error,
 }
 
@@ -292,7 +292,7 @@ impl CoreManager {
         // endpoint is a configuration error whether or not this core ends up
         // selecting local IPC, and construction is the caller's last chance to
         // fix it.
-        config::managed_endpoint_path(store.dir(), options.controller_template.as_deref(), 0)?;
+        config::validate_managed_endpoint(store.dir(), options.controller_template.as_deref())?;
         for (name, timeout) in [
             ("control_timeout", options.control_timeout),
             ("reconcile_timeout", options.reconcile_timeout),
@@ -690,7 +690,7 @@ async fn abort_and_await(mut forwarder: tokio::task::JoinHandle<()>) {
 fn spawn_forwarder(
     inner: &Arc<Inner>,
     mut state_rx: watch::Receiver<InstanceStatus>,
-    epoch: u64,
+    epoch: Epoch,
 ) -> tokio::task::JoinHandle<()> {
     let inner = Arc::downgrade(inner);
     tokio::spawn(async move {
@@ -711,13 +711,14 @@ fn spawn_forwarder(
 #[cfg(test)]
 mod tests {
     use super::EpochAllocator;
+    use crate::epoch::epoch;
 
     #[test]
     fn epochs_are_monotone_past_the_seed_and_never_zero() {
         let mut fresh = EpochAllocator::seeded(0);
-        assert_eq!(fresh.next(), 1);
+        assert_eq!(fresh.next(), epoch(1));
         let mut seeded = EpochAllocator::seeded(7);
-        assert_eq!((seeded.next(), seeded.next()), (8, 9));
+        assert_eq!((seeded.next(), seeded.next()), (epoch(8), epoch(9)));
     }
 
     #[test]

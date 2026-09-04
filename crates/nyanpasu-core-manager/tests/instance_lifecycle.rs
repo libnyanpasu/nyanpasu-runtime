@@ -38,7 +38,7 @@ async fn start_confirms_via_version_probe() {
     // plan; the two only stay interchangeable while the instance echoes it.
     let (expected_spec, expected_controller) = (format!("{spec:?}"), format!("{controller:?}"));
 
-    let instance = Instance::spawn(spec, 1, controller, CancellationToken::new())
+    let instance = Instance::spawn(spec, common::epoch(1), controller, CancellationToken::new())
         .await
         .expect("spawn");
     let (recorder, log) = common::record_states(instance.state());
@@ -48,7 +48,7 @@ async fn start_confirms_via_version_probe() {
         instance.state().borrow().state,
         InstanceState::Running { pid } if pid > 0
     ));
-    assert_eq!(instance.epoch(), 1);
+    assert_eq!(instance.epoch(), common::epoch(1));
     assert_eq!(format!("{:?}", instance.spec()), expected_spec);
     assert_eq!(format!("{:?}", instance.controller()), expected_controller);
 
@@ -75,9 +75,14 @@ async fn dropping_an_instance_kills_the_core() {
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let spec = common::mihomo_spec(&dir, config);
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
     instance.wait_ready().await.expect("healthy");
     drop(instance);
     common::wait_port_refused(port).await;
@@ -94,9 +99,14 @@ async fn startup_timeout_kills_the_core() {
     let mut spec = common::mihomo_spec(&dir, config);
     spec.options.startup_timeout = std::time::Duration::from_secs(1);
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
     let err = instance.wait_ready().await.expect_err("must time out");
     assert!(
         matches!(err, nyanpasu_core_manager::Error::StartupTimeout { .. }),
@@ -121,9 +131,14 @@ async fn immediate_exit_reports_stderr_tail() {
     spec.options.restart_policy =
         nyanpasu_utils::process::RestartPolicy::OnFailure { max_restarts: 1 };
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn succeeds; the failure is the exit");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn succeeds; the failure is the exit");
     let err = instance.wait_ready().await.expect_err("must fail");
     match err {
         nyanpasu_core_manager::Error::StartupFailed { stderr_tail } => {
@@ -152,9 +167,14 @@ async fn immediate_exit_reports_a_stdout_fatal() {
     spec.options.restart_policy =
         nyanpasu_utils::process::RestartPolicy::OnFailure { max_restarts: 1 };
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn succeeds; the failure is the exit");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn succeeds; the failure is the exit");
     let err = instance.wait_ready().await.expect_err("must fail");
     match err {
         nyanpasu_core_manager::Error::StartupFailed { stderr_tail } => {
@@ -177,9 +197,14 @@ async fn crash_recovers_through_restart_and_reprobe() {
     );
     let spec = common::mihomo_spec(&dir, config);
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
     let (recorder, log) = common::record_states(instance.state());
     instance.wait_ready().await.expect("initially healthy");
 
@@ -233,9 +258,14 @@ async fn crash_loop_exhausts_the_budget() {
     spec.options.restart_policy =
         nyanpasu_utils::process::RestartPolicy::OnFailure { max_restarts: 1 };
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
     instance
         .wait_ready()
         .await
@@ -265,9 +295,14 @@ async fn user_stop_is_terminal_and_releases_the_port() {
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let spec = common::mihomo_spec(&dir, config);
 
-    let instance = Instance::spawn(spec, 1, http_controller(port), CancellationToken::new())
-        .await
-        .expect("spawn");
+    let instance = Instance::spawn(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("spawn");
     instance.wait_ready().await.expect("healthy");
     let mut rx = instance.state();
     instance.stop().await.expect("stop");
@@ -311,11 +346,16 @@ async fn custom_readiness_and_success_threshold_gate_running() {
         }
     });
 
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(probe)
-        .spawn()
-        .await
-        .expect("spawn");
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(probe)
+    .spawn()
+    .await
+    .expect("spawn");
     instance.wait_ready().await.expect("threshold reached");
     assert!(calls.load(Ordering::SeqCst) >= 3);
     assert!(matches!(
@@ -347,11 +387,16 @@ async fn liveness_is_off_by_default_after_custom_readiness() {
             async { ProbeResult::Healthy }
         }
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(probe)
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(probe)
+    .spawn()
+    .await
+    .unwrap();
     instance.wait_ready().await.unwrap();
     let after_ready = calls.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -381,12 +426,17 @@ async fn readiness_probe_can_be_reused_for_liveness() {
             async { ProbeResult::Healthy }
         }
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(probe)
-        .liveness_with_readiness_probe()
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(probe)
+    .liveness_with_readiness_probe()
+    .spawn()
+    .await
+    .unwrap();
     instance.wait_ready().await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         while !phases.lock().contains(&ProbePhase::Liveness) {
@@ -437,12 +487,17 @@ async fn liveness_hysteresis_is_observe_only_and_recovers() {
             }
         }
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(readiness)
-        .liveness_probe(liveness)
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(readiness)
+    .liveness_probe(liveness)
+    .spawn()
+    .await
+    .unwrap();
     instance.wait_ready().await.unwrap();
     let pid = instance.pid().unwrap();
 
@@ -503,11 +558,16 @@ async fn absolute_startup_deadline_rejects_late_probe_success() {
         tokio::time::sleep(Duration::from_millis(400)).await;
         ProbeResult::Healthy
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(probe)
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(probe)
+    .spawn()
+    .await
+    .unwrap();
     let error = instance.wait_ready().await.expect_err("deadline must win");
     assert!(matches!(
         error,
@@ -542,14 +602,19 @@ async fn stop_cancels_a_hanging_liveness_probe() {
             }
         }
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(ProbeHandle::from_fn("ready", |_| async {
-            ProbeResult::Healthy
-        }))
-        .liveness_probe(liveness)
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(ProbeHandle::from_fn("ready", |_| async {
+        ProbeResult::Healthy
+    }))
+    .liveness_probe(liveness)
+    .spawn()
+    .await
+    .unwrap();
     instance.wait_ready().await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), started.notified())
         .await
@@ -581,15 +646,20 @@ async fn startup_timeout_is_one_budget_across_crash_retries() {
         Duration::from_millis(10),
         Duration::from_millis(10),
     );
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(ProbeHandle::from_fn("never-ready", |_| async {
-            ProbeResult::Unhealthy {
-                detail: Some("not ready".into()),
-            }
-        }))
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(ProbeHandle::from_fn("never-ready", |_| async {
+        ProbeResult::Unhealthy {
+            detail: Some("not ready".into()),
+        }
+    }))
+    .spawn()
+    .await
+    .unwrap();
     let started = std::time::Instant::now();
     let error = instance.wait_ready().await.expect_err("must time out");
     assert!(matches!(
@@ -649,11 +719,16 @@ async fn exited_run_cancels_its_in_flight_probe_before_replacement() {
             }
         }
     });
-    let instance = Instance::builder(spec, 1, http_controller(port), CancellationToken::new())
-        .readiness_probe(probe)
-        .spawn()
-        .await
-        .unwrap();
+    let instance = Instance::builder(
+        spec,
+        common::epoch(1),
+        http_controller(port),
+        CancellationToken::new(),
+    )
+    .readiness_probe(probe)
+    .spawn()
+    .await
+    .unwrap();
     let error = instance
         .wait_ready()
         .await

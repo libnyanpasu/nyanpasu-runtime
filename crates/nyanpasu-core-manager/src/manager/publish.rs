@@ -1,4 +1,5 @@
 use crate::{
+    epoch::Epoch,
     error::Error,
     runtime::RuntimeInstance,
     state::{
@@ -52,7 +53,7 @@ impl Inner {
         });
     }
 
-    pub(super) fn publish_epoch_status(&self, epoch: u64, instance: InstanceStatus) {
+    pub(super) fn publish_epoch_status(&self, epoch: Epoch, instance: InstanceStatus) {
         self.status_tx
             .send_if_modified(|status| apply_epoch_status(status, epoch, &instance));
     }
@@ -80,7 +81,7 @@ fn default_health_for_state(
     Some(health)
 }
 
-fn apply_epoch_status(status: &mut CoreStatus, epoch: u64, instance: &InstanceStatus) -> bool {
+fn apply_epoch_status(status: &mut CoreStatus, epoch: Epoch, instance: &InstanceStatus) -> bool {
     if status.revision.as_ref().map(|revision| revision.epoch) != Some(epoch) {
         return false;
     }
@@ -129,7 +130,7 @@ impl CoreManager {
     }
 }
 
-pub(super) fn instance_core_state(epoch: u64, state: &InstanceState) -> CoreState {
+pub(super) fn instance_core_state(epoch: Epoch, state: &InstanceState) -> CoreState {
     match state {
         InstanceState::Starting => CoreState::Starting { epoch },
         InstanceState::Running { pid } => CoreState::Running { epoch, pid: *pid },
@@ -146,6 +147,7 @@ pub(super) fn instance_core_state(epoch: u64, state: &InstanceState) -> CoreStat
 
 #[cfg(test)]
 mod tests {
+    use crate::epoch::epoch;
     use tokio::sync::watch;
 
     use super::*;
@@ -155,17 +157,23 @@ mod tests {
     fn old_epoch_events_cannot_overwrite_new_epoch_status() {
         let mut status = CoreStatus::initial();
         status.revision = Some(ConfigRevision {
-            epoch: 9,
+            epoch: epoch(9),
             generation: 1,
             source_hash: "source".into(),
             effective_hash: "effective".into(),
             runtime_path: "config-9.yaml".into(),
         });
-        status.state = CoreState::Running { epoch: 9, pid: 90 };
+        status.state = CoreState::Running {
+            epoch: epoch(9),
+            pid: 90,
+        };
         for stale in [
-            CoreState::Running { epoch: 8, pid: 80 },
+            CoreState::Running {
+                epoch: epoch(8),
+                pid: 80,
+            },
             CoreState::Restarting {
-                epoch: 8,
+                epoch: epoch(8),
                 attempt: 2,
             },
             CoreState::Stopped {
@@ -183,10 +191,10 @@ mod tests {
                 },
                 health: None,
             };
-            assert!(!apply_epoch_status(&mut status, 8, &stale_status));
+            assert!(!apply_epoch_status(&mut status, epoch(8), &stale_status));
             assert!(matches!(
                 status.state,
-                CoreState::Running { epoch: 9, pid: 90 }
+                CoreState::Running { epoch: observed, pid: 90 } if observed == epoch(9)
             ));
         }
     }
@@ -195,26 +203,29 @@ mod tests {
     fn stale_epoch_status_neither_mutates_nor_wakes_watchers() {
         let mut status = CoreStatus::initial();
         status.revision = Some(ConfigRevision {
-            epoch: 9,
+            epoch: epoch(9),
             generation: 1,
             source_hash: "source".into(),
             effective_hash: "effective".into(),
             runtime_path: "config-9.yaml".into(),
         });
-        status.state = CoreState::Running { epoch: 9, pid: 90 };
+        status.state = CoreState::Running {
+            epoch: epoch(9),
+            pid: 90,
+        };
         let (tx, rx) = watch::channel(status);
         let stale = InstanceStatus {
             state: InstanceState::Running { pid: 80 },
             health: Some(HealthStatus::starting()),
         };
 
-        let sent = tx.send_if_modified(|status| apply_epoch_status(status, 8, &stale));
+        let sent = tx.send_if_modified(|status| apply_epoch_status(status, epoch(8), &stale));
 
         assert!(!sent);
         assert!(!rx.has_changed().unwrap());
         assert!(matches!(
             rx.borrow().state,
-            CoreState::Running { epoch: 9, pid: 90 }
+            CoreState::Running { epoch: observed, pid: 90 } if observed == epoch(9)
         ));
     }
 
@@ -222,13 +233,16 @@ mod tests {
     fn pure_health_transition_preserves_lifecycle_changed_at() {
         let mut status = CoreStatus::initial();
         status.revision = Some(ConfigRevision {
-            epoch: 3,
+            epoch: epoch(3),
             generation: 1,
             source_hash: "source".into(),
             effective_hash: "effective".into(),
             runtime_path: "config-3.yaml".into(),
         });
-        status.state = CoreState::Running { epoch: 3, pid: 30 };
+        status.state = CoreState::Running {
+            epoch: epoch(3),
+            pid: 30,
+        };
         status.changed_at = 7;
         let mut health = HealthStatus::starting();
         health.state = crate::state::HealthState::Unhealthy;
@@ -237,7 +251,7 @@ mod tests {
             health: Some(health.clone()),
         };
 
-        assert!(apply_epoch_status(&mut status, 3, &instance));
+        assert!(apply_epoch_status(&mut status, epoch(3), &instance));
         assert_eq!(status.changed_at, 7);
         assert_eq!(status.health, Some(health));
     }

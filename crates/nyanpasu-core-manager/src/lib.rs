@@ -7,6 +7,7 @@ mod capability;
 mod config;
 pub mod control;
 pub mod dns;
+mod epoch;
 mod error;
 mod health;
 pub mod instance;
@@ -27,6 +28,7 @@ pub use control::{
     ReconcileRequest, payload_digest,
 };
 pub use dns::{DnsController, DnsError, DnsIntent, DnsOverrideRecord, DnsOverrideState};
+pub use epoch::Epoch;
 pub use error::{CoreErrorKind, Error};
 pub use health::{HealthPolicy, probe};
 pub use instance::{Instance, InstanceBuilder};

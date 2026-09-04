@@ -41,7 +41,7 @@ async fn manager_builder_forwards_atomic_runtime_health_without_bumping_lifecycl
     let readiness = ProbeHandle::from_fn("manager-readiness", {
         let readiness_calls = readiness_calls.clone();
         move |context| {
-            assert_eq!(context.epoch, 1);
+            assert_eq!(context.epoch, common::epoch(1));
             readiness_calls.fetch_add(1, Ordering::SeqCst);
             async { ProbeResult::Healthy }
         }
@@ -79,7 +79,7 @@ async fn manager_builder_forwards_atomic_runtime_health_without_bumping_lifecycl
     let CoreState::Running { epoch, pid } = running.state else {
         panic!("manager did not publish running")
     };
-    assert_eq!(epoch, 1);
+    assert_eq!(epoch, common::epoch(1));
     assert_eq!(running.health.unwrap().state, HealthState::Healthy);
 
     failing.store(true, Ordering::SeqCst);
@@ -101,9 +101,9 @@ async fn manager_builder_forwards_atomic_runtime_health_without_bumping_lifecycl
     assert!(matches!(
         unhealthy.state,
         CoreState::Running {
-            epoch: 1,
+            epoch,
             pid: current
-        } if current == pid
+        } if epoch == common::epoch(1) && current == pid
     ));
     assert_eq!(unhealthy.changed_at, running_changed_at);
     manager.stop().await.unwrap();
@@ -194,7 +194,7 @@ async fn start_publishes_running_and_rejects_double_start() {
     let CoreState::Running { epoch, pid } = state else {
         unreachable!()
     };
-    assert!(epoch >= 1 && pid > 0);
+    assert!(epoch >= common::epoch(1) && pid > 0);
     let status = manager.status();
     assert_eq!(
         status.spec.as_ref().map(|s| s.config_path.clone()),
@@ -639,7 +639,7 @@ async fn manager_sweeps_stale_artifacts_and_advances_epoch() {
         .expect("start after sweep");
     assert!(matches!(
         manager.status().state,
-        CoreState::Running { epoch: 10, .. }
+        CoreState::Running { epoch, .. } if epoch == common::epoch(10)
     ));
     manager.shutdown().await.expect("shutdown");
 }
@@ -736,7 +736,7 @@ async fn initial_start_stop_uncertainty_quarantines_until_recovery() {
         .expect_err("quarantine must reject another initial start");
     assert!(matches!(
         start_error,
-        Error::ManagerQuarantined { epoch: 1, .. }
+        Error::ManagerQuarantined { epoch, .. } if epoch == common::epoch(1)
     ));
 
     std::fs::write(&pid_path, record).unwrap();

@@ -8,10 +8,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
     ApplyOutcome, ConfigInput, ConfigRevision, ControlOptions, CoreCommand, CoreCommandEnvelope,
     CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
-    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Error as ManagerError, ExecutorExit,
-    HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy, LogFrame,
-    LogLevel, ManagerOptions, OperationHandle, OperationId, OperationOutput, OperationState,
-    ReconcileRequest, RevisionId,
+    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Epoch, Error as ManagerError,
+    ExecutorExit, HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy,
+    LogFrame, LogLevel, ManagerOptions, OperationHandle, OperationId, OperationOutput,
+    OperationState, ReconcileRequest, RevisionId,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
@@ -403,7 +403,7 @@ impl CoreManagerService {
                         expected_digest: expected_digest.as_ref().map(|digest| digest.to_string()),
                     },
                     options: spec.options,
-                    expected_applied: expected_applied.as_ref().map(map_revision_id),
+                    expected_applied: expected_applied.as_ref().map(map_revision_id).transpose()?,
                 }))
             }
             CoreCommandInfo::Stop => CoreCommand::Stop,
@@ -711,20 +711,25 @@ fn map_health(health: &HealthStatus) -> CoreHealthInfo {
 /// 0o700 runtime directory, which the client cannot read.
 fn map_revision(revision: &ConfigRevision) -> ConfigRevisionInfo {
     ConfigRevisionInfo {
-        epoch: revision.epoch,
+        epoch: revision.epoch.get(),
         generation: revision.generation,
         source_hash: revision.source_hash.clone(),
         effective_hash: revision.effective_hash.clone(),
     }
 }
 
-/// The wire CAS token, as the manager compares it.
-fn map_revision_id(info: &RevisionIdInfo) -> RevisionId {
-    RevisionId {
-        epoch: info.epoch,
+/// The wire CAS token, as the manager compares it. The epoch arrives from a
+/// client, so it is validated rather than trusted: zero names no epoch the
+/// allocator can ever have issued, and a token that cannot match is a
+/// malformed request, not a mismatch.
+fn map_revision_id(info: &RevisionIdInfo) -> Result<RevisionId, OpError> {
+    let epoch = Epoch::try_from(info.epoch)
+        .map_err(|_| OpError::plain("expected revision epoch must be nonzero"))?;
+    Ok(RevisionId {
+        epoch,
         generation: info.generation,
         effective_hash: info.effective_hash.clone(),
-    }
+    })
 }
 
 /// Project an apply result onto the wire.
@@ -836,20 +841,24 @@ fn map_state_detail(state: &ManagerCoreState) -> Option<CoreStateDetail> {
         ManagerCoreState::Stopped { reason } => Some(CoreStateDetail::Stopped {
             reason: reason.as_ref().map(ToString::to_string),
         }),
-        ManagerCoreState::Starting { epoch } => Some(CoreStateDetail::Starting { epoch: *epoch }),
+        ManagerCoreState::Starting { epoch } => {
+            Some(CoreStateDetail::Starting { epoch: epoch.get() })
+        }
         ManagerCoreState::Running { epoch, pid } => Some(CoreStateDetail::Running {
-            epoch: *epoch,
+            epoch: epoch.get(),
             pid: *pid,
         }),
         ManagerCoreState::Restarting { epoch, attempt } => Some(CoreStateDetail::Restarting {
-            epoch: *epoch,
+            epoch: epoch.get(),
             attempt: *attempt,
         }),
         ManagerCoreState::Switching { from, to } => Some(CoreStateDetail::Switching {
-            from: *from,
-            to: *to,
+            from: from.map(Epoch::get),
+            to: to.get(),
         }),
-        ManagerCoreState::Stopping { epoch } => Some(CoreStateDetail::Stopping { epoch: *epoch }),
+        ManagerCoreState::Stopping { epoch } => {
+            Some(CoreStateDetail::Stopping { epoch: epoch.get() })
+        }
         // `CoreState` is `#[non_exhaustive]`; an unknown state has no faithful
         // projection, so it is reported as absent.
         _ => None,
@@ -965,6 +974,12 @@ async fn canonical_config_path(config_file: &Path) -> Result<Utf8PathBuf, OpErro
 
 #[cfg(test)]
 mod tests {
+    /// The epoch a test means when it writes a number. Production code keeps
+    /// paying the nonzero check at every boundary; a test that skipped it
+    /// would stop exercising the barrier it is meant to prove.
+    fn epoch(value: u64) -> Epoch {
+        Epoch::new(value).expect("a test epoch must be nonzero")
+    }
     use std::time::Duration;
 
     use nyanpasu_core_manager::StopReason;
@@ -1008,14 +1023,17 @@ mod tests {
         assert_eq!(
             format!(
                 "{:?}",
-                map_core_state(&ManagerCoreState::Starting { epoch: 1 })
+                map_core_state(&ManagerCoreState::Starting { epoch: epoch(1) })
             ),
             "Stopped(None)"
         );
         assert_eq!(
             format!(
                 "{:?}",
-                map_core_state(&ManagerCoreState::Running { epoch: 1, pid: 42 })
+                map_core_state(&ManagerCoreState::Running {
+                    epoch: epoch(1),
+                    pid: 42
+                })
             ),
             "Running"
         );
@@ -1023,7 +1041,7 @@ mod tests {
             format!(
                 "{:?}",
                 map_core_state(&ManagerCoreState::Restarting {
-                    epoch: 1,
+                    epoch: epoch(1),
                     attempt: 2,
                 })
             ),
@@ -1033,8 +1051,8 @@ mod tests {
             format!(
                 "{:?}",
                 map_core_state(&ManagerCoreState::Switching {
-                    from: Some(1),
-                    to: 2,
+                    from: Some(epoch(1)),
+                    to: epoch(2),
                 })
             ),
             "Running"
@@ -1042,7 +1060,7 @@ mod tests {
         assert_eq!(
             format!(
                 "{:?}",
-                map_core_state(&ManagerCoreState::Stopping { epoch: 2 })
+                map_core_state(&ManagerCoreState::Stopping { epoch: epoch(2) })
             ),
             "Running"
         );
@@ -1094,14 +1112,20 @@ mod tests {
     #[test]
     fn the_state_bridge_forwards_only_real_transitions() {
         let states = [
-            ManagerCoreState::Starting { epoch: 1 },
-            ManagerCoreState::Running { epoch: 1, pid: 42 },
-            ManagerCoreState::Switching {
-                from: Some(1),
-                to: 2,
+            ManagerCoreState::Starting { epoch: epoch(1) },
+            ManagerCoreState::Running {
+                epoch: epoch(1),
+                pid: 42,
             },
-            ManagerCoreState::Stopping { epoch: 2 },
-            ManagerCoreState::Running { epoch: 2, pid: 43 },
+            ManagerCoreState::Switching {
+                from: Some(epoch(1)),
+                to: epoch(2),
+            },
+            ManagerCoreState::Stopping { epoch: epoch(2) },
+            ManagerCoreState::Running {
+                epoch: epoch(2),
+                pid: 43,
+            },
             ManagerCoreState::Stopped {
                 reason: Some(StopReason::User),
             },
@@ -1123,11 +1147,14 @@ mod tests {
     #[test]
     fn terminal_stop_is_not_resurrected_by_shutdown() {
         let states = [
-            ManagerCoreState::Running { epoch: 1, pid: 42 },
+            ManagerCoreState::Running {
+                epoch: epoch(1),
+                pid: 42,
+            },
             ManagerCoreState::Stopped {
                 reason: Some(StopReason::Error("boom".to_owned())),
             },
-            ManagerCoreState::Stopping { epoch: 1 },
+            ManagerCoreState::Stopping { epoch: epoch(1) },
             ManagerCoreState::Stopped {
                 reason: Some(StopReason::User),
             },
@@ -1159,16 +1186,19 @@ mod tests {
                 },
             ),
             (
-                ManagerCoreState::Starting { epoch: 1 },
+                ManagerCoreState::Starting { epoch: epoch(1) },
                 CoreStateDetail::Starting { epoch: 1 },
             ),
             (
-                ManagerCoreState::Running { epoch: 1, pid: 42 },
+                ManagerCoreState::Running {
+                    epoch: epoch(1),
+                    pid: 42,
+                },
                 CoreStateDetail::Running { epoch: 1, pid: 42 },
             ),
             (
                 ManagerCoreState::Restarting {
-                    epoch: 1,
+                    epoch: epoch(1),
                     attempt: 2,
                 },
                 CoreStateDetail::Restarting {
@@ -1178,8 +1208,8 @@ mod tests {
             ),
             (
                 ManagerCoreState::Switching {
-                    from: Some(1),
-                    to: 2,
+                    from: Some(epoch(1)),
+                    to: epoch(2),
                 },
                 CoreStateDetail::Switching {
                     from: Some(1),
@@ -1187,7 +1217,7 @@ mod tests {
                 },
             ),
             (
-                ManagerCoreState::Stopping { epoch: 2 },
+                ManagerCoreState::Stopping { epoch: epoch(2) },
                 CoreStateDetail::Stopping { epoch: 2 },
             ),
         ];
@@ -1202,7 +1232,7 @@ mod tests {
     #[test]
     fn the_detail_field_recovers_what_the_wire_state_flattens() {
         let restarting = ManagerCoreState::Restarting {
-            epoch: 1,
+            epoch: epoch(1),
             attempt: 3,
         };
         assert!(matches!(
@@ -1261,7 +1291,7 @@ mod tests {
     #[test]
     fn the_revision_projection_drops_the_runtime_path() {
         let revision = ConfigRevision {
-            epoch: 3,
+            epoch: epoch(3),
             generation: 7,
             source_hash: "0123456789abcdef".to_owned(),
             effective_hash: "fedcba9876543210".to_owned(),
@@ -1300,7 +1330,7 @@ mod tests {
 
     fn revision(generation: u64) -> ConfigRevision {
         ConfigRevision {
-            epoch: 3,
+            epoch: epoch(3),
             generation,
             source_hash: "0123456789abcdef".to_owned(),
             effective_hash: "fedcba9876543210".to_owned(),
@@ -1422,13 +1452,34 @@ mod tests {
                 epoch: 3,
                 generation: 7,
                 effective_hash: "fedcba9876543210".to_owned(),
-            }),
+            })
+            .unwrap_or_else(|_| panic!("a nonzero wire epoch is a revision id")),
             RevisionId {
-                epoch: 3,
+                epoch: epoch(3),
                 generation: 7,
                 effective_hash: "fedcba9876543210".to_owned(),
             }
         );
+    }
+
+    /// Zero names no epoch the allocator can ever have issued, so a CAS token
+    /// carrying it is malformed rather than merely stale — and a client that
+    /// sends one gets told which field is wrong instead of a mismatch.
+    #[test]
+    fn a_zero_expected_epoch_is_rejected_rather_than_compared() {
+        let error = map_revision_id(&RevisionIdInfo {
+            epoch: 0,
+            generation: 7,
+            effective_hash: "fedcba9876543210".to_owned(),
+        })
+        .expect_err("zero is not an epoch");
+
+        assert_eq!(error.message, "expected revision epoch must be nonzero");
+        // Rejected while promoting wire data, so it never reaches the operation
+        // registry: no kind, no retry advice, and the operation id stays free
+        // for a corrected resubmission.
+        assert_eq!(error.kind, None);
+        assert_eq!(error.retryable, None);
     }
 
     fn status_of(state: ManagerCoreState) -> CoreStatus {
@@ -1504,7 +1555,10 @@ mod tests {
 
         // A manager transition with no echo yet: the snapshot leads, the legacy
         // state follows.
-        states.send_replace(status_of(ManagerCoreState::Running { epoch: 1, pid: 7 }));
+        states.send_replace(status_of(ManagerCoreState::Running {
+            epoch: epoch(1),
+            pid: 7,
+        }));
         let status = tokio::time::timeout(Duration::from_secs(5), events.recv())
             .await
             .expect("timed out waiting for the manager status snapshot")
@@ -1547,7 +1601,10 @@ mod tests {
     /// adapter republishes the unchanged value, which `send_modify` notifies on.
     #[tokio::test]
     async fn republishing_an_unchanged_echo_still_refreshes_the_snapshot() {
-        let states = watch::Sender::new(status_of(ManagerCoreState::Running { epoch: 1, pid: 7 }));
+        let states = watch::Sender::new(status_of(ManagerCoreState::Running {
+            epoch: epoch(1),
+            pid: 7,
+        }));
         let requested = watch::Sender::new(Some(mihomo()));
         let hub = EventHub::new();
         let mut events = hub.subscribe();
@@ -1705,14 +1762,20 @@ mod tests {
     #[test]
     fn the_snapshot_stream_carries_every_transition_the_legacy_stream_suppresses() {
         let states = [
-            ManagerCoreState::Starting { epoch: 1 },
-            ManagerCoreState::Running { epoch: 1, pid: 42 },
+            ManagerCoreState::Starting { epoch: epoch(1) },
+            ManagerCoreState::Running {
+                epoch: epoch(1),
+                pid: 42,
+            },
             ManagerCoreState::Restarting {
-                epoch: 1,
+                epoch: epoch(1),
                 attempt: 2,
             },
-            ManagerCoreState::Running { epoch: 1, pid: 43 },
-            ManagerCoreState::Stopping { epoch: 1 },
+            ManagerCoreState::Running {
+                epoch: epoch(1),
+                pid: 43,
+            },
+            ManagerCoreState::Stopping { epoch: epoch(1) },
             ManagerCoreState::Stopped {
                 reason: Some(StopReason::User),
             },
@@ -1759,7 +1822,7 @@ mod tests {
     fn the_snapshot_payload_keeps_the_lossy_state_and_adds_the_faithful_detail() {
         let infos = project_core_infos(
             &status_of(ManagerCoreState::Restarting {
-                epoch: 3,
+                epoch: epoch(3),
                 attempt: 2,
             }),
             Some(CoreType::Clash(ClashCoreType::MihomoAlpha)),
