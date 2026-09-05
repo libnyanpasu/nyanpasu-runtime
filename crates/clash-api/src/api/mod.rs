@@ -25,7 +25,7 @@ pub use maintenance::{Hello, StatusResponse, UpgradeOptions};
 pub use memory::Memory;
 pub use proxies::{
     Delay, DelayHistory, DelayQuery, ExpectedStatus, ProviderName, ProviderType, Proxy, ProxyExtra,
-    ProxyName, ProxyProvider, SubscriptionInfo, VehicleType,
+    ProxyName, ProxyProvider, ProxySelection, SubscriptionInfo, VehicleType,
 };
 pub use rules::{
     Rule, RuleExtra, RuleFormat, RulePatch, RuleProvider, RuleProviderBehavior, RuleProviderName,

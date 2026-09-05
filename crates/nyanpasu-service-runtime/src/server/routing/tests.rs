@@ -31,7 +31,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use super::{AppState, create_router};
-use crate::server::{CoreManager, EventHub, Logger, consts::RuntimeInfos};
+use crate::server::{CoreManager, EventHub, Logger, ServiceDirs, consts::RuntimeInfos};
 
 struct TestEnv {
     state: AppState,
@@ -46,9 +46,15 @@ impl TestEnv {
             Utf8PathBuf::from_path_buf(root.join("core-runtime")).expect("temp path is UTF-8");
         let data_dir =
             Utf8PathBuf::from_path_buf(root.join("nyanpasu-data")).expect("temp path is UTF-8");
-        let core_manager = CoreManager::new(runtime_dir, LocalIpcPolicy::Disable, data_dir)
-            .await
-            .unwrap();
+        let core_manager = CoreManager::new(
+            ServiceDirs {
+                runtime: runtime_dir,
+                data: data_dir,
+            },
+            LocalIpcPolicy::Disable,
+        )
+        .await
+        .unwrap();
         let runtime = Arc::new(RuntimeInfos {
             service_data_dir: root.join("service-data"),
             service_config_dir: root.join("service-config"),

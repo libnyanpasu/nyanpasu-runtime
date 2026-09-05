@@ -5,8 +5,8 @@ use axum::{
     routing::{get, put},
 };
 use clash_api::{
-    Client, ConfigPatch, Host, ProviderName, ProxyName, StorageKey, UpdateConfigOptions,
-    UpdateConfigRequest, UpgradeOptions,
+    Client, ConfigPatch, Host, ProviderName, ProxyName, ProxySelection, StorageKey,
+    UpdateConfigOptions, UpdateConfigRequest, UpgradeOptions,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -92,7 +92,10 @@ async fn typed_rest_methods_preserve_queries_bodies_and_empty_responses() {
         .await
         .unwrap();
     client
-        .select_proxy(&ProxyName::from("GLOBAL/日本"), &ProxyName::from("DIRECT"))
+        .select_proxy(ProxySelection {
+            group: &ProxyName::from("GLOBAL/日本"),
+            target: &ProxyName::from("DIRECT"),
+        })
         .await
         .unwrap();
     server.abort();
