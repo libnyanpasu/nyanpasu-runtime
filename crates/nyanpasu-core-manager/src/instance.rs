@@ -261,17 +261,17 @@ impl Instance {
         .await?;
         *shared.supervisor.lock().await = Some(supervisor);
 
-        let monitor = tokio::spawn(monitor_loop(
-            event_rx,
-            shared.clone(),
+        let monitor = tokio::spawn(monitor_loop(MonitorLoopArgs {
+            events: event_rx,
+            shared: shared.clone(),
             epoch,
-            spec.options.clone(),
-            controller.clone(),
+            options: spec.options.clone(),
+            controller: controller.clone(),
             readiness_probe,
             liveness_probe,
             initial_deadline,
-            probe_request_rx,
-        ));
+            probe_requests: probe_request_rx,
+        }));
         *shared.monitor.lock().await = Some(monitor);
 
         Ok(Instance {
@@ -548,9 +548,10 @@ struct RunState {
     tracker: HealthTracker,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn monitor_loop(
-    mut events: mpsc::UnboundedReceiver<SupervisorEvent>,
+/// Everything the monitor task is started with, so that adding to the set does
+/// not mean threading one more positional argument through the spawn site.
+struct MonitorLoopArgs {
+    events: mpsc::UnboundedReceiver<SupervisorEvent>,
     shared: Arc<Shared>,
     epoch: Epoch,
     options: InstanceOptions,
@@ -558,8 +559,21 @@ async fn monitor_loop(
     readiness_probe: ProbeHandle,
     liveness_probe: Option<ProbeHandle>,
     initial_deadline: Instant,
-    mut probe_requests: mpsc::UnboundedReceiver<ProbeNowRequest>,
-) {
+    probe_requests: mpsc::UnboundedReceiver<ProbeNowRequest>,
+}
+
+async fn monitor_loop(args: MonitorLoopArgs) {
+    let MonitorLoopArgs {
+        mut events,
+        shared,
+        epoch,
+        options,
+        controller,
+        readiness_probe,
+        liveness_probe,
+        initial_deadline,
+        mut probe_requests,
+    } = args;
     let (observation_tx, mut observations) = mpsc::unbounded_channel();
     let mut ever_ready = false;
     let mut timeout_fired = false;
@@ -653,16 +667,17 @@ async fn monitor_loop(
             },
             _ = tokio::time::sleep_until(initial_deadline), if !ever_ready && !timeout_fired => {
                 // Total limit for the initial start, crash-retries included.
-                let became_ready = drain_probe_observations(
-                    &mut observations,
-                    &mut current,
-                    &mut ever_ready,
-                    &mut respawn_deadline,
+                let became_ready = ProbeReconcile {
+                    current: &mut current,
+                    ever_ready: &mut ever_ready,
+                    respawn_deadline: &mut respawn_deadline,
                     initial_deadline,
-                    &shared,
-                    driver.as_ref(),
+                    shared: &shared,
+                    driver: driver.as_ref(),
                     epoch,
-                ).await;
+                }
+                .drain(&mut observations)
+                .await;
                 if !became_ready && !ever_ready {
                     timeout_fired = true;
                     current = None;
@@ -674,16 +689,17 @@ async fn monitor_loop(
                 }
             }
             _ = tokio::time::sleep_until(respawn_deadline_for_select), if respawn_deadline.is_some() => {
-                let became_ready = drain_probe_observations(
-                    &mut observations,
-                    &mut current,
-                    &mut ever_ready,
-                    &mut respawn_deadline,
+                let became_ready = ProbeReconcile {
+                    current: &mut current,
+                    ever_ready: &mut ever_ready,
+                    respawn_deadline: &mut respawn_deadline,
                     initial_deadline,
-                    &shared,
-                    driver.as_ref(),
+                    shared: &shared,
+                    driver: driver.as_ref(),
                     epoch,
-                ).await;
+                }
+                .drain(&mut observations)
+                .await;
                 if !became_ready && respawn_deadline.is_some() {
                     current = None;
                     respawn_deadline = None;
@@ -712,16 +728,17 @@ async fn monitor_loop(
             },
             observation = observations.recv() => {
                 let Some(observation) = observation else { continue };
-                apply_probe_observation(
-                    observation,
-                    &mut current,
-                    &mut ever_ready,
-                    &mut respawn_deadline,
+                ProbeReconcile {
+                    current: &mut current,
+                    ever_ready: &mut ever_ready,
+                    respawn_deadline: &mut respawn_deadline,
                     initial_deadline,
-                    &shared,
-                    driver.as_ref(),
+                    shared: &shared,
+                    driver: driver.as_ref(),
                     epoch,
-                ).await;
+                }
+                .apply(observation)
+                .await;
             }
         }
     }
@@ -731,106 +748,97 @@ fn observation_applies(observation: &ProbeObservation, run: &RunState) -> bool {
     observation.run_id == run.run_id && observation.pid == run.pid
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn apply_probe_observation(
-    observation: ProbeObservation,
-    current: &mut Option<RunState>,
-    ever_ready: &mut bool,
-    respawn_deadline: &mut Option<Instant>,
+/// The state one probe observation reconciles. The three `&mut` fields were
+/// separate parameters that every call site had to keep in the same order;
+/// grouping them makes the loop hand over its readiness state as one thing.
+///
+/// Built per observation inside a `select!` arm and dropped at the end of the
+/// statement, so the borrows never outlive the arm that took them.
+struct ProbeReconcile<'a> {
+    current: &'a mut Option<RunState>,
+    ever_ready: &'a mut bool,
+    respawn_deadline: &'a mut Option<Instant>,
     initial_deadline: Instant,
-    shared: &Shared,
-    driver: Option<&ProbeDriver>,
+    shared: &'a Shared,
+    driver: Option<&'a ProbeDriver>,
     epoch: Epoch,
-) -> bool {
-    let Some(run) = current.as_mut() else {
-        return false;
-    };
-    if !observation_applies(&observation, run) {
-        return false;
-    }
-    let beyond_initial_deadline =
-        !*ever_ready && observation.completed_at > initial_deadline.into_std();
-    let beyond_respawn_deadline =
-        respawn_deadline.is_some_and(|deadline| observation.completed_at > deadline.into_std());
-    if beyond_initial_deadline || beyond_respawn_deadline {
-        return false;
-    }
-
-    tracing::trace!(
-        epoch = epoch.get(),
-        run_id = observation.run_id,
-        pid = observation.pid,
-        phase = ?observation.phase,
-        "applying health probe observation"
-    );
-    let update = run
-        .tracker
-        .observe(observation.completed_at, &observation.result);
-    let should_ack = !run.ack_attempted && update.state == TrackerState::Healthy;
-    if should_ack {
-        run.ack_attempted = true;
-        let pid = run.pid;
-        let supervisor = shared.supervisor.lock().await;
-        let acknowledged = match supervisor.as_ref() {
-            Some(supervisor) => supervisor.acknowledge_ready(pid).await,
-            None => false,
-        };
-        drop(supervisor);
-        if acknowledged {
-            *ever_ready = true;
-            *respawn_deadline = None;
-            if let Some(run) = current.as_mut() {
-                run.ready = true;
-            }
-            if let Some(driver) = driver {
-                driver.use_liveness();
-            }
-            let previous = shared.state_tx.borrow().health.clone();
-            shared.publish_status(InstanceStatus {
-                state: InstanceState::Running { pid },
-                health: Some(health_status(previous.as_ref(), &update, &observation)),
-            });
-        }
-        return acknowledged;
-    }
-
-    let previous = shared.state_tx.borrow().health.clone();
-    let lifecycle = shared.state_tx.borrow().state.clone();
-    shared.publish_status(InstanceStatus {
-        state: lifecycle,
-        health: Some(health_status(previous.as_ref(), &update, &observation)),
-    });
-    false
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn drain_probe_observations(
-    observations: &mut mpsc::UnboundedReceiver<ProbeObservation>,
-    current: &mut Option<RunState>,
-    ever_ready: &mut bool,
-    respawn_deadline: &mut Option<Instant>,
-    initial_deadline: Instant,
-    shared: &Shared,
-    driver: Option<&ProbeDriver>,
-    epoch: Epoch,
-) -> bool {
-    while let Ok(observation) = observations.try_recv() {
-        let became_ready = apply_probe_observation(
-            observation,
-            current,
-            ever_ready,
-            respawn_deadline,
-            initial_deadline,
-            shared,
-            driver,
-            epoch,
-        )
-        .await;
-        if became_ready {
-            return true;
+impl ProbeReconcile<'_> {
+    async fn apply(&mut self, observation: ProbeObservation) -> bool {
+        let Some(run) = self.current.as_mut() else {
+            return false;
+        };
+        if !observation_applies(&observation, run) {
+            return false;
         }
+        let beyond_initial_deadline =
+            !*self.ever_ready && observation.completed_at > self.initial_deadline.into_std();
+        let beyond_respawn_deadline = self
+            .respawn_deadline
+            .is_some_and(|deadline| observation.completed_at > deadline.into_std());
+        if beyond_initial_deadline || beyond_respawn_deadline {
+            return false;
+        }
+
+        tracing::trace!(
+            epoch = self.epoch.get(),
+            run_id = observation.run_id,
+            pid = observation.pid,
+            phase = ?observation.phase,
+            "applying health probe observation"
+        );
+        let update = run
+            .tracker
+            .observe(observation.completed_at, &observation.result);
+        let should_ack = !run.ack_attempted && update.state == TrackerState::Healthy;
+        if should_ack {
+            run.ack_attempted = true;
+            let pid = run.pid;
+            let supervisor = self.shared.supervisor.lock().await;
+            let acknowledged = match supervisor.as_ref() {
+                Some(supervisor) => supervisor.acknowledge_ready(pid).await,
+                None => false,
+            };
+            drop(supervisor);
+            if acknowledged {
+                *self.ever_ready = true;
+                *self.respawn_deadline = None;
+                if let Some(run) = self.current.as_mut() {
+                    run.ready = true;
+                }
+                if let Some(driver) = self.driver {
+                    driver.use_liveness();
+                }
+                let previous = self.shared.state_tx.borrow().health.clone();
+                self.shared.publish_status(InstanceStatus {
+                    state: InstanceState::Running { pid },
+                    health: Some(health_status(previous.as_ref(), &update, &observation)),
+                });
+            }
+            return acknowledged;
+        }
+
+        let previous = self.shared.state_tx.borrow().health.clone();
+        let lifecycle = self.shared.state_tx.borrow().state.clone();
+        self.shared.publish_status(InstanceStatus {
+            state: lifecycle,
+            health: Some(health_status(previous.as_ref(), &update, &observation)),
+        });
+        false
     }
-    false
+
+    async fn drain(
+        &mut self,
+        observations: &mut mpsc::UnboundedReceiver<ProbeObservation>,
+    ) -> bool {
+        while let Ok(observation) = observations.try_recv() {
+            if self.apply(observation).await {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 async fn stop_probe_driver(driver: &mut Option<ProbeDriver>) {
@@ -1066,16 +1074,16 @@ mod tests {
         tokio::time::sleep_until(initial_deadline + Duration::from_millis(1)).await;
 
         assert!(
-            drain_probe_observations(
-                &mut observations,
-                &mut current,
-                &mut ever_ready,
-                &mut respawn_deadline,
+            ProbeReconcile {
+                current: &mut current,
+                ever_ready: &mut ever_ready,
+                respawn_deadline: &mut respawn_deadline,
                 initial_deadline,
-                &shared,
-                None,
-                epoch(1),
-            )
+                shared: &shared,
+                driver: None,
+                epoch: epoch(1),
+            }
+            .drain(&mut observations)
             .await
         );
         assert!(ever_ready);
