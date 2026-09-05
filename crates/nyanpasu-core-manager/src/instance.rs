@@ -191,7 +191,7 @@ impl Instance {
         if tokio::fs::metadata(&spec.core.binary_path).await.is_err() {
             return Err(Error::BinaryNotFound(spec.core.binary_path.clone()));
         }
-        kind::run_args(spec.core.kind, &spec.working_dir, &spec.config_path)?;
+        kind::run_args(spec.core.kind, spec.core_paths())?;
 
         let readiness_probe = match readiness_probe {
             Some(probe) => probe,
@@ -501,7 +501,7 @@ impl Drop for Instance {
 }
 
 fn build_command(spec: &InstanceSpec, epoch: Epoch, controller: &ResolvedController) -> Command {
-    let mut args = kind::run_args(spec.core.kind, &spec.working_dir, &spec.config_path)
+    let mut args = kind::run_args(spec.core.kind, spec.core_paths())
         .expect("kind validated in Instance::spawn");
     args.extend(kind::controller_args(spec.core.kind, &controller.host));
     let config_dir = spec

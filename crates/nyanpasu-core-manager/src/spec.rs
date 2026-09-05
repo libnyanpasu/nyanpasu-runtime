@@ -28,6 +28,15 @@ pub struct InstanceSpec {
     pub options: InstanceOptions,
 }
 
+impl InstanceSpec {
+    pub(crate) fn core_paths(&self) -> crate::kind::CorePaths<'_> {
+        crate::kind::CorePaths {
+            working_dir: &self.working_dir,
+            config_path: &self.config_path,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstanceOptions {
     /// Total limit for the initial start (spawn → readiness threshold).
