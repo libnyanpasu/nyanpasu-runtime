@@ -241,7 +241,11 @@ impl RuntimeConfigStore {
         self.validate_staged(&staged, epoch).await?;
         let target = self.runtime_path(epoch);
         atomic_fs::validate_existing_regular_target(&target).await?;
-        atomic_fs::atomic_replace(&staged.path, &target).await?;
+        atomic_fs::atomic_replace(atomic_fs::AtomicReplacement {
+            replacement: staged.path.as_std_path(),
+            destination: target.as_std_path(),
+        })
+        .await?;
         staged.consumed = true;
         #[cfg(feature = "test-hooks")]
         let injected_failure = self

@@ -12,7 +12,7 @@ use nyanpasu_core_manager::{
     InstanceSpec,
     state::{HealthState, InstanceState, InstanceStatus},
 };
-use nyanpasu_utils::process::{Backoff, RestartPolicy};
+use nyanpasu_utils::process::{Backoff, BackoffRange, RestartPolicy};
 use parking_lot::Mutex;
 use tokio::sync::watch;
 
@@ -51,7 +51,10 @@ pub fn fast_options() -> InstanceOptions {
         })
         .unwrap(),
         restart_policy: RestartPolicy::OnFailure { max_restarts: 2 },
-        backoff: Backoff::exponential(Duration::from_millis(50), Duration::from_millis(200)),
+        backoff: Backoff::exponential(BackoffRange {
+            initial: Duration::from_millis(50),
+            max: Duration::from_millis(200),
+        }),
     }
 }
 

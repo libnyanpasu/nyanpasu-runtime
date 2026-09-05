@@ -231,7 +231,11 @@ impl CoreManager {
                     // "absent": we cannot publish safely into a directory we
                     // cannot stat.
                     if tokio::fs::try_exists(&path).await? {
-                        atomic_fs::atomic_replace(&staging, &path).await
+                        atomic_fs::atomic_replace(atomic_fs::AtomicReplacement {
+                            replacement: staging.as_std_path(),
+                            destination: path.as_std_path(),
+                        })
+                        .await
                     } else {
                         atomic_fs::atomic_move_new(&staging, &path).await
                     }

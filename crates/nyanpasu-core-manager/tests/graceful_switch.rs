@@ -825,10 +825,11 @@ async fn failed_new_core_while_old_restarting_republishes_actual_state() {
     .await
     .expect("construct manager");
     let mut spec_a = common::mihomo_spec(&dir, config_a);
-    spec_a.options.backoff = nyanpasu_utils::process::Backoff::exponential(
-        Duration::from_secs(60),
-        Duration::from_secs(60),
-    );
+    spec_a.options.backoff =
+        nyanpasu_utils::process::Backoff::exponential(nyanpasu_utils::process::BackoffRange {
+            initial: Duration::from_secs(60),
+            max: Duration::from_secs(60),
+        });
     let mut rx = manager.subscribe();
 
     manager.start(spec_a).await.expect("start A");
