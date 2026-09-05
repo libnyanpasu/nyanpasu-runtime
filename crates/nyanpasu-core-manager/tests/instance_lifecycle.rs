@@ -10,7 +10,7 @@ use std::{
 };
 
 use nyanpasu_core_manager::{
-    HealthPolicy, ProbeHandle, ProbePhase, ProbeResult,
+    HealthPolicy, HealthPolicySpec, HealthThresholds, ProbeHandle, ProbePhase, ProbeResult,
     instance::Instance,
     spec::ResolvedController,
     state::{HealthState, InstanceState},
@@ -329,13 +329,15 @@ async fn custom_readiness_and_success_threshold_gate_running() {
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(20),
-        Duration::from_secs(1),
-        NonZeroU32::new(3).unwrap(),
-        NonZeroU32::new(3).unwrap(),
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(20),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::new(3).unwrap(),
+            success: NonZeroU32::new(3).unwrap(),
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let probe = ProbeHandle::from_fn("threshold-readiness", {
@@ -371,13 +373,15 @@ async fn liveness_is_off_by_default_after_custom_readiness() {
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(20),
-        Duration::from_secs(1),
-        NonZeroU32::new(3).unwrap(),
-        NonZeroU32::MIN,
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(20),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::new(3).unwrap(),
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let probe = ProbeHandle::from_fn("readiness-only", {
@@ -410,13 +414,15 @@ async fn readiness_probe_can_be_reused_for_liveness() {
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(20),
-        Duration::from_secs(1),
-        NonZeroU32::MIN,
-        NonZeroU32::MIN,
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(20),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::MIN,
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let phases = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let probe = ProbeHandle::from_fn("shared-probe", {
@@ -455,13 +461,15 @@ async fn liveness_hysteresis_is_observe_only_and_recovers() {
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(20),
-        Duration::from_secs(1),
-        NonZeroU32::new(2).unwrap(),
-        NonZeroU32::new(2).unwrap(),
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(20),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::new(2).unwrap(),
+            success: NonZeroU32::new(2).unwrap(),
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let readiness = ProbeHandle::from_fn("ready", |_| async { ProbeResult::Healthy });
     let failures_remaining = Arc::new(AtomicUsize::new(0));
@@ -546,13 +554,15 @@ async fn absolute_startup_deadline_rejects_late_probe_success() {
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
     spec.options.startup_timeout = Duration::from_millis(120);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(10),
-        Duration::from_secs(1),
-        NonZeroU32::MIN,
-        NonZeroU32::MIN,
-        Duration::from_secs(1),
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(10),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::MIN,
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::from_secs(1),
+    })
     .unwrap();
     let probe = ProbeHandle::from_fn("late-success", |_| async {
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -582,13 +592,15 @@ async fn stop_cancels_a_hanging_liveness_probe() {
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(10),
-        Duration::from_secs(5),
-        NonZeroU32::MIN,
-        NonZeroU32::MIN,
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(10),
+        timeout: Duration::from_secs(5),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::MIN,
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let started = Arc::new(tokio::sync::Notify::new());
     let liveness = ProbeHandle::from_fn("hanging", {
@@ -690,13 +702,15 @@ async fn exited_run_cancels_its_in_flight_probe_before_replacement() {
     );
     let mut spec = common::mihomo_spec(&dir, config);
     spec.options.startup_timeout = Duration::from_millis(450);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(5),
-        Duration::from_secs(1),
-        NonZeroU32::MIN,
-        NonZeroU32::MIN,
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(5),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::MIN,
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let first_pid = Arc::new(parking_lot::Mutex::new(None));
     let probe = ProbeHandle::from_fn("late-first-run", {

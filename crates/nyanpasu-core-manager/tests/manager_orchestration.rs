@@ -10,8 +10,9 @@ use std::{
 };
 
 use nyanpasu_core_manager::{
-    CoreState, Error, HealthPolicy, HealthState, LocalIpcPolicy, LogLevel, LogStream,
-    ManagerOptions, ProbeHandle, ProbeResult, StopReason, manager::CoreManager,
+    CoreState, Error, HealthPolicy, HealthPolicySpec, HealthState, HealthThresholds,
+    LocalIpcPolicy, LogLevel, LogStream, ManagerOptions, ProbeHandle, ProbeResult, StopReason,
+    manager::CoreManager,
 };
 
 async fn manager(runtime_dir: &camino::Utf8Path) -> CoreManager {
@@ -29,13 +30,15 @@ async fn manager_builder_forwards_atomic_runtime_health_without_bumping_lifecycl
     let port = common::free_port();
     let config = common::write_config(&dir, &format!("external-controller: 127.0.0.1:{port}\n"));
     let mut spec = common::mihomo_spec(&dir, config);
-    spec.options.health = HealthPolicy::new(
-        Duration::from_millis(20),
-        Duration::from_secs(1),
-        NonZeroU32::new(2).unwrap(),
-        NonZeroU32::MIN,
-        Duration::ZERO,
-    )
+    spec.options.health = HealthPolicy::new(HealthPolicySpec {
+        interval: Duration::from_millis(20),
+        timeout: Duration::from_secs(1),
+        thresholds: HealthThresholds {
+            failure: NonZeroU32::new(2).unwrap(),
+            success: NonZeroU32::MIN,
+        },
+        start_period: Duration::ZERO,
+    })
     .unwrap();
     let readiness_calls = Arc::new(AtomicUsize::new(0));
     let readiness = ProbeHandle::from_fn("manager-readiness", {

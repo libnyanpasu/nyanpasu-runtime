@@ -30,7 +30,7 @@ pub use control::{
 pub use dns::{DnsController, DnsError, DnsIntent, DnsOverrideRecord, DnsOverrideState};
 pub use epoch::Epoch;
 pub use error::{CoreErrorKind, Error};
-pub use health::{HealthPolicy, probe};
+pub use health::{HealthPolicy, HealthPolicySpec, HealthThresholds, probe};
 pub use instance::{Instance, InstanceBuilder};
 pub use kind::CoreKind;
 pub use log::{LogField, LogFrame, LogLevel, LogStream, LogTimestamp};
