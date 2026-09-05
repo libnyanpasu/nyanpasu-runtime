@@ -23,9 +23,9 @@ use axum::{
 };
 use clash_api::{
     Client, ConfigPatch, Connection, ConnectionStreamQuery, DelayQuery, DnsQuery, DnsRecordType,
-    ExpectedStatus, Host, LogEntry, LogLevel, LogQuery, Memory, ProviderName, ProxyName, RulePatch,
-    RuleProviderName, StorageKey, StructuredLogEntry, Traffic, TunnelMode, UpdateConfigOptions,
-    UpdateConfigRequest, UpgradeOptions,
+    ExpectedStatus, Host, LogEntry, LogLevel, LogQuery, Memory, ProviderName, ProxyName,
+    ProxySelection, RulePatch, RuleProviderName, StorageKey, StructuredLogEntry, Traffic,
+    TunnelMode, UpdateConfigOptions, UpdateConfigRequest, UpgradeOptions,
 };
 use futures_util::{StreamExt, stream};
 use reqwest_websocket::Message;
@@ -477,7 +477,10 @@ async fn assert_proxy_and_rule_apis(client: &Client, healthcheck_url: &str) {
     );
 
     client
-        .select_proxy(&ProxyName::from(GROUP), &ProxyName::from(REJECT))
+        .select_proxy(ProxySelection {
+            group: &ProxyName::from(GROUP),
+            target: &ProxyName::from(REJECT),
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -485,7 +488,10 @@ async fn assert_proxy_and_rule_apis(client: &Client, healthcheck_url: &str) {
         Some(ProxyName::from(REJECT))
     );
     client
-        .select_proxy(&ProxyName::from(GROUP), &ProxyName::from(DIRECT))
+        .select_proxy(ProxySelection {
+            group: &ProxyName::from(GROUP),
+            target: &ProxyName::from(DIRECT),
+        })
         .await
         .unwrap();
 

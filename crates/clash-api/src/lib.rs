@@ -10,11 +10,11 @@ pub use api::{
     DelayHistory, DelayQuery, DnsMode, DnsQuery, DnsQuestion, DnsRecord, DnsRecordType,
     DnsResponse, ExpectedStatus, FindProcessMode, GeoUrls, Hello, LogEntry, LogField, LogLevel,
     LogQuery, Memory, MuxOptions, ProviderName, ProviderType, Proxy, ProxyExtra, ProxyName,
-    ProxyProvider, Rule, RuleExtra, RuleFormat, RulePatch, RuleProvider, RuleProviderBehavior,
-    RuleProviderName, RuntimeConfig, RuntimeTuicServer, RuntimeTun, StatusResponse, StorageKey,
-    StructuredLogEntry, StructuredLogLevel, SubscriptionInfo, Traffic, TuicServerPatch, TunPatch,
-    TunStack, TunnelMode, UpdateConfigOptions, UpdateConfigRequest, UpgradeOptions, VehicleType,
-    Version,
+    ProxyProvider, ProxySelection, Rule, RuleExtra, RuleFormat, RulePatch, RuleProvider,
+    RuleProviderBehavior, RuleProviderName, RuntimeConfig, RuntimeTuicServer, RuntimeTun,
+    StatusResponse, StorageKey, StructuredLogEntry, StructuredLogLevel, SubscriptionInfo, Traffic,
+    TuicServerPatch, TunPatch, TunStack, TunnelMode, UpdateConfigOptions, UpdateConfigRequest,
+    UpgradeOptions, VehicleType, Version,
 };
 pub use client::{Client, ClientBuilder, ControllerEndpoint, Host, Secret};
 pub use error::{Error, ErrorBody, Result};

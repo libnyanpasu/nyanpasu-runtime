@@ -10,6 +10,14 @@ use crate::{Client, Error, Result, retry::RequestMetadata};
 #[serde(transparent)]
 pub struct ProxyName(String);
 
+/// Which node to select, and in which group. Both sides are `ProxyName`, so
+/// only a name tells the group apart from the node inside it.
+#[derive(Debug, Clone, Copy)]
+pub struct ProxySelection<'a> {
+    pub group: &'a ProxyName,
+    pub target: &'a ProxyName,
+}
+
 impl ProxyName {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
@@ -335,7 +343,8 @@ impl Client {
         .await
     }
 
-    pub async fn select_proxy(&self, group: &ProxyName, target: &ProxyName) -> Result<()> {
+    pub async fn select_proxy(&self, selection: ProxySelection<'_>) -> Result<()> {
+        let ProxySelection { group, target } = selection;
         let url = self.endpoint_with_segments("/proxies", [group.as_str(), ""])?;
         self.send_empty(
             RequestMetadata::new("select_proxy", Method::PUT, false),
