@@ -203,27 +203,34 @@ pub(crate) enum OverlapBlock {
     InboundSurface,
 }
 
+/// One side of a classification: the two documents an epoch was planned from
+/// and the process spec it would run under. Bundling them keeps each side
+/// together instead of interleaving six references in which the four
+/// `&Mapping` are mutually interchangeable and so are the two `&InstanceSpec`.
+#[derive(Clone, Copy)]
+pub(crate) struct ConfigClassificationView<'a> {
+    pub source: &'a Mapping,
+    pub effective: &'a Mapping,
+    pub spec: &'a InstanceSpec,
+}
+
 pub(crate) fn classify(
-    current_source: &Mapping,
-    current_effective: &Mapping,
-    current_spec: &InstanceSpec,
-    desired_source: &Mapping,
-    desired_effective: &Mapping,
-    desired_spec: &InstanceSpec,
+    current: ConfigClassificationView<'_>,
+    desired: ConfigClassificationView<'_>,
 ) -> Result<ConfigChange, Error> {
-    if process_spec_changed(current_spec, desired_spec) {
+    if process_spec_changed(current.spec, desired.spec) {
         return Ok(ConfigChange::Switch);
     }
 
-    let source_diff = diff(current_source, desired_source);
-    if desired_spec.core.kind != CoreKind::Mihomo {
+    let source_diff = diff(current.source, desired.source);
+    if desired.spec.core.kind != CoreKind::Mihomo {
         // Non-mihomo kinds degrade to Switch. An identical config is still a
         // Noop — but only when the *effective* documents also match: a
         // capability change (e.g. the binary was replaced in place and now
         // resolves a different version) can alter the derived config and the
         // resolved controller without any source edit, and that must restart.
         let unchanged =
-            source_diff.is_empty() && diff(current_effective, desired_effective).is_empty();
+            source_diff.is_empty() && diff(current.effective, desired.effective).is_empty();
         return Ok(if unchanged {
             ConfigChange::Noop
         } else {
@@ -240,7 +247,7 @@ pub(crate) fn classify(
     }) {
         return Ok(ConfigChange::Switch);
     }
-    classify_documents(current_effective, desired_effective)
+    classify_documents(current.effective, desired.effective)
 }
 
 fn process_spec_changed(current: &InstanceSpec, desired: &InstanceSpec) -> bool {
@@ -542,12 +549,16 @@ mod tests {
             assert!(
                 matches!(
                     classify(
-                        &mapping("mixed-port: 7890"),
-                        &Mapping::new(),
-                        &spec,
-                        &mapping("mixed-port: 7890"),
-                        &Mapping::new(),
-                        &spec,
+                        ConfigClassificationView {
+                            source: &mapping("mixed-port: 7890"),
+                            effective: &Mapping::new(),
+                            spec: &spec,
+                        },
+                        ConfigClassificationView {
+                            source: &mapping("mixed-port: 7890"),
+                            effective: &Mapping::new(),
+                            spec: &spec,
+                        },
                     )
                     .unwrap(),
                     ConfigChange::Noop
@@ -564,12 +575,16 @@ mod tests {
         let spec = spec(CoreKind::ClashRust, "clash-rs");
         assert!(matches!(
             classify(
-                &mapping("mixed-port: 7890"),
-                &mapping("external-controller: 127.0.0.1:9090"),
-                &spec,
-                &mapping("mixed-port: 7890"),
-                &mapping("external-controller-pipe: /tmp/core-1.sock"),
-                &spec,
+                ConfigClassificationView {
+                    source: &mapping("mixed-port: 7890"),
+                    effective: &mapping("external-controller: 127.0.0.1:9090"),
+                    spec: &spec,
+                },
+                ConfigClassificationView {
+                    source: &mapping("mixed-port: 7890"),
+                    effective: &mapping("external-controller-pipe: /tmp/core-1.sock"),
+                    spec: &spec,
+                },
             )
             .unwrap(),
             ConfigChange::Switch
@@ -584,12 +599,16 @@ mod tests {
         let spec = spec(CoreKind::Mihomo, "mihomo");
         assert!(matches!(
             classify(
-                &mapping("mixed-port: 7890"),
-                &mapping("external-controller: 127.0.0.1:9090"),
-                &spec,
-                &mapping("mixed-port: 7890"),
-                &mapping("external-controller-pipe: /tmp/core-1.sock"),
-                &spec,
+                ConfigClassificationView {
+                    source: &mapping("mixed-port: 7890"),
+                    effective: &mapping("external-controller: 127.0.0.1:9090"),
+                    spec: &spec,
+                },
+                ConfigClassificationView {
+                    source: &mapping("mixed-port: 7890"),
+                    effective: &mapping("external-controller-pipe: /tmp/core-1.sock"),
+                    spec: &spec,
+                },
             )
             .unwrap(),
             ConfigChange::Switch
@@ -603,36 +622,48 @@ mod tests {
         changed_binary.core.binary_path = "other-mihomo".into();
         assert!(matches!(
             classify(
-                &mapping("external-controller: 127.0.0.1:9090"),
-                &Mapping::new(),
-                &current,
-                &mapping("external-controller: 127.0.0.1:9091"),
-                &Mapping::new(),
-                &current,
+                ConfigClassificationView {
+                    source: &mapping("external-controller: 127.0.0.1:9090"),
+                    effective: &Mapping::new(),
+                    spec: &current,
+                },
+                ConfigClassificationView {
+                    source: &mapping("external-controller: 127.0.0.1:9091"),
+                    effective: &Mapping::new(),
+                    spec: &current,
+                },
             )
             .unwrap(),
             ConfigChange::Switch
         ));
         assert!(matches!(
             classify(
-                &Mapping::new(),
-                &Mapping::new(),
-                &current,
-                &Mapping::new(),
-                &Mapping::new(),
-                &changed_binary,
+                ConfigClassificationView {
+                    source: &Mapping::new(),
+                    effective: &Mapping::new(),
+                    spec: &current,
+                },
+                ConfigClassificationView {
+                    source: &Mapping::new(),
+                    effective: &Mapping::new(),
+                    spec: &changed_binary,
+                },
             )
             .unwrap(),
             ConfigChange::Switch
         ));
         assert!(matches!(
             classify(
-                &Mapping::new(),
-                &Mapping::new(),
-                &current,
-                &Mapping::new(),
-                &Mapping::new(),
-                &spec(CoreKind::ClashRust, "clash-rs"),
+                ConfigClassificationView {
+                    source: &Mapping::new(),
+                    effective: &Mapping::new(),
+                    spec: &current,
+                },
+                ConfigClassificationView {
+                    source: &Mapping::new(),
+                    effective: &Mapping::new(),
+                    spec: &spec(CoreKind::ClashRust, "clash-rs"),
+                },
             )
             .unwrap(),
             ConfigChange::Switch

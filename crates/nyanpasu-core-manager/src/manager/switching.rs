@@ -334,7 +334,7 @@ impl CoreManager {
         if tokio::fs::metadata(&spec.core.binary_path).await.is_err() {
             return Err(Error::BinaryNotFound(spec.core.binary_path.clone()));
         }
-        crate::kind::run_args(spec.core.kind, &spec.working_dir, &spec.config_path)?;
+        crate::kind::run_args(spec.core.kind, spec.core_paths())?;
         Ok(())
     }
 

@@ -196,6 +196,16 @@ struct EpochPlan {
     effective_document: Mapping,
 }
 
+impl EpochPlan {
+    fn classification_view(&self) -> mihomo::ConfigClassificationView<'_> {
+        mihomo::ConfigClassificationView {
+            source: &self.source_document,
+            effective: &self.effective_document,
+            spec: &self.source_spec,
+        }
+    }
+}
+
 struct Active {
     instance: Box<dyn RuntimeInstance>,
     forwarder: tokio::task::JoinHandle<()>,

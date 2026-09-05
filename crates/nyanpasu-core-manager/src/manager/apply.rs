@@ -53,12 +53,8 @@ impl CoreManager {
             .prepare_apply(current, input.clone(), &snapshot)
             .await?;
         let change = mihomo::classify(
-            &current.plan.source_document,
-            &current.plan.effective_document,
-            &current.plan.source_spec,
-            &prepared.plan.source_document,
-            &prepared.plan.effective_document,
-            &prepared.plan.source_spec,
+            current.plan.classification_view(),
+            prepared.plan.classification_view(),
         )?;
         if matches!(change, ConfigChange::Noop) {
             return Ok(ApplyOutcome::Noop {

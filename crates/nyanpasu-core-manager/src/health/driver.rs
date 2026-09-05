@@ -192,7 +192,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::probe::{HealthProbe, ProbeFuture};
+    use crate::{
+        health::{HealthPolicySpec, HealthThresholds},
+        probe::{HealthProbe, ProbeFuture},
+    };
 
     fn controller() -> Arc<ResolvedController> {
         Arc::new(ResolvedController {
@@ -202,13 +205,15 @@ mod tests {
     }
 
     fn policy(interval: Duration, timeout: Duration) -> HealthPolicy {
-        HealthPolicy::new(
+        HealthPolicy::new(HealthPolicySpec {
             interval,
             timeout,
-            std::num::NonZeroU32::MIN,
-            std::num::NonZeroU32::MIN,
-            Duration::ZERO,
-        )
+            thresholds: HealthThresholds {
+                failure: std::num::NonZeroU32::MIN,
+                success: std::num::NonZeroU32::MIN,
+            },
+            start_period: Duration::ZERO,
+        })
         .unwrap()
     }
 
