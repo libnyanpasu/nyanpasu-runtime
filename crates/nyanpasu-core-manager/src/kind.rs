@@ -5,7 +5,10 @@ use std::{ffi::OsString, time::Duration};
 use camino::Utf8Path;
 use nyanpasu_utils::process::ProcessError;
 
-use crate::{error::Error, log::summarize_output};
+use crate::{
+    error::Error,
+    log::{CapturedOutput, summarize_output},
+};
 
 pub use nyanpasu_core_metadata::ClashCoreKind as CoreKind;
 
@@ -141,8 +144,10 @@ async fn run_check(spec: &crate::spec::InstanceSpec, timeout: Duration) -> Resul
     }
     Err(Error::ConfigCheckFailed(summarize_output(
         spec.core.kind,
-        &output.stdout,
-        &output.stderr,
+        CapturedOutput {
+            stdout: &output.stdout,
+            stderr: &output.stderr,
+        },
     )))
 }
 
@@ -204,7 +209,13 @@ mod tests {
         let log = "time=\"2026-07-18T10:00:00Z\" level=info msg=\"start\"\n\
                    time=\"2026-07-18T10:00:01Z\" level=error msg=\"configuration file /x.yaml test failed\"";
         assert_eq!(
-            summarize_output(CoreKind::Mihomo, log, ""),
+            summarize_output(
+                CoreKind::Mihomo,
+                CapturedOutput {
+                    stdout: log,
+                    stderr: "",
+                },
+            ),
             "configuration file /x.yaml test failed"
         );
     }
@@ -212,7 +223,13 @@ mod tests {
     #[test]
     fn check_output_keeps_unrecognized_text() {
         assert_eq!(
-            summarize_output(CoreKind::Mihomo, "plain failure", ""),
+            summarize_output(
+                CoreKind::Mihomo,
+                CapturedOutput {
+                    stdout: "plain failure",
+                    stderr: "",
+                },
+            ),
             "plain failure"
         );
     }
@@ -220,7 +237,13 @@ mod tests {
     #[test]
     fn check_output_no_longer_special_cases_clash_rs() {
         assert_eq!(
-            summarize_output(CoreKind::ClashRust, "", "Error: invalid config"),
+            summarize_output(
+                CoreKind::ClashRust,
+                CapturedOutput {
+                    stdout: "",
+                    stderr: "Error: invalid config",
+                },
+            ),
             "Error: invalid config"
         );
     }
