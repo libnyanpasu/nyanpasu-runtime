@@ -170,21 +170,30 @@ pub struct CoreManagerService {
     inner: Arc<Inner>,
 }
 
+/// The two directories the service runs out of. They are both `Utf8PathBuf`
+/// and were passed on either side of the IPC policy, so only a name says
+/// which root the manager owns and which one belongs to the application.
+pub struct ServiceDirs {
+    /// Where the core manager keeps its runtime state and staged sources.
+    pub runtime: Utf8PathBuf,
+    /// The Nyanpasu application data directory.
+    pub data: Utf8PathBuf,
+}
+
 impl CoreManagerService {
     pub async fn new(
-        runtime_dir: Utf8PathBuf,
+        dirs: ServiceDirs,
         local_ipc_policy: LocalIpcPolicy,
-        data_dir: Utf8PathBuf,
     ) -> Result<Self, anyhow::Error> {
-        let source_dir = runtime_dir.join("v2-sources");
+        let source_dir = dirs.runtime.join("v2-sources");
         let manager = Manager::new(ManagerOptions {
-            runtime_dir: Some(runtime_dir),
+            runtime_dir: Some(dirs.runtime),
             local_ipc_policy,
             ..ManagerOptions::default()
         })
         .await?;
         let core_control =
-            CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, data_dir));
+            CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, dirs.data));
         Ok(Self {
             inner: Arc::new(Inner {
                 manager,
@@ -1512,9 +1521,15 @@ mod tests {
             .expect("temp path is UTF-8");
         let data_dir = Utf8PathBuf::from_path_buf(dir.path().join("nyanpasu-data"))
             .expect("temp path is UTF-8");
-        let service = CoreManagerService::new(runtime_dir, LocalIpcPolicy::Disable, data_dir)
-            .await
-            .expect("the manager builds on a fresh runtime dir");
+        let service = CoreManagerService::new(
+            ServiceDirs {
+                runtime: runtime_dir,
+                data: data_dir,
+            },
+            LocalIpcPolicy::Disable,
+        )
+        .await
+        .expect("the manager builds on a fresh runtime dir");
         (dir, service)
     }
 
