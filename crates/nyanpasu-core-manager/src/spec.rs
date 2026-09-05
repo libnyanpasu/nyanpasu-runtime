@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use nyanpasu_utils::process::{Backoff, RestartPolicy};
+use nyanpasu_utils::process::{Backoff, BackoffRange, RestartPolicy};
 use tokio_util::sync::CancellationToken;
 
 use crate::{health::HealthPolicy, kind::CoreKind};
@@ -52,8 +52,11 @@ impl Default for InstanceOptions {
             startup_timeout: Duration::from_secs(30),
             health: HealthPolicy::default(),
             restart_policy: RestartPolicy::OnFailure { max_restarts: 5 },
-            backoff: Backoff::exponential(Duration::from_secs(1), Duration::from_secs(30))
-                .with_jitter(),
+            backoff: Backoff::exponential(BackoffRange {
+                initial: Duration::from_secs(1),
+                max: Duration::from_secs(30),
+            })
+            .with_jitter(),
         }
     }
 }

@@ -498,7 +498,7 @@ use std::num::NonZeroU32;
 use nyanpasu_core_manager::{
     HealthPolicy, HealthPolicySpec, HealthThresholds, InstanceOptions,
 };
-use nyanpasu_utils::process::{Backoff, RestartPolicy};
+use nyanpasu_utils::process::{Backoff, BackoffRange, RestartPolicy};
 
 let options = InstanceOptions {
     // Total budget for the initial start, crash retries included.
@@ -513,8 +513,11 @@ let options = InstanceOptions {
         start_period: Duration::ZERO,         // failure grace per child run
     })?,
     restart_policy: RestartPolicy::OnFailure { max_restarts: 5 },
-    backoff: Backoff::exponential(Duration::from_secs(1), Duration::from_secs(30))
-        .with_jitter(),
+    backoff: Backoff::exponential(BackoffRange {
+        initial: Duration::from_secs(1),
+        max: Duration::from_secs(30),
+    })
+    .with_jitter(),
 };
 ```
 

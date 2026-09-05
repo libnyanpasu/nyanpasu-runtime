@@ -654,10 +654,11 @@ async fn startup_timeout_is_one_budget_across_crash_retries() {
     spec.options.startup_timeout = Duration::from_secs(10);
     spec.options.restart_policy =
         nyanpasu_utils::process::RestartPolicy::OnFailure { max_restarts: 20 };
-    spec.options.backoff = nyanpasu_utils::process::Backoff::exponential(
-        Duration::from_millis(10),
-        Duration::from_millis(10),
-    );
+    spec.options.backoff =
+        nyanpasu_utils::process::Backoff::exponential(nyanpasu_utils::process::BackoffRange {
+            initial: Duration::from_millis(10),
+            max: Duration::from_millis(10),
+        });
     let instance = Instance::builder(
         spec,
         common::epoch(1),

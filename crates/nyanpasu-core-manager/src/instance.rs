@@ -9,8 +9,8 @@ use std::{
 };
 
 use nyanpasu_utils::process::{
-    Command, EpochPidFile, OrphanReapOutcome, ProcessError, ProcessEvent, ReadinessProbe,
-    Supervisor, SupervisorEvent, TerminatedPayload, reap_epoch_pid_file,
+    Command, EpochPidFile, EpochPidFileSpec, OrphanReapOutcome, ProcessError, ProcessEvent,
+    ReadinessProbe, Supervisor, SupervisorEvent, TerminatedPayload, reap_epoch_pid_file,
 };
 use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
@@ -518,11 +518,11 @@ fn build_command(spec: &InstanceSpec, epoch: Epoch, controller: &ResolvedControl
         .current_dir(spec.working_dir.as_str());
     if let Some(pid_file) = &spec.pid_file {
         command = if epoch_pid_path(spec, epoch).is_some() {
-            command.epoch_pid_file(EpochPidFile::new(
-                pid_file.as_std_path(),
-                epoch.get(),
-                spec.config_path.as_std_path(),
-            ))
+            command.epoch_pid_file(EpochPidFile::new(EpochPidFileSpec {
+                pid_path: pid_file.as_std_path(),
+                runtime_config: spec.config_path.as_std_path(),
+                epoch: epoch.get(),
+            }))
         } else {
             command.pid_file(pid_file.as_std_path())
         };
