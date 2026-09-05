@@ -19,7 +19,7 @@ pub use api::{
 pub use client::{Client, ClientBuilder, ControllerEndpoint, Host, Secret};
 pub use error::{Error, ErrorBody, Result};
 pub use indexmap::IndexMap;
-pub use retry::{ExponentialRetry, NoRetry, RequestMetadata, RetryPolicy};
+pub use retry::{DelayRange, ExponentialRetry, NoRetry, RequestMetadata, RetryPolicy};
 pub use stream::HttpStream;
 
 // TODO(ws-typed-stream): consider an opt-in typed frame adapter after raw
