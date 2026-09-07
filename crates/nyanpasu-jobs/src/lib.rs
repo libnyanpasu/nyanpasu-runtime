@@ -1,4 +1,4 @@
-//! Actor-owned jobs with durable runs, scheduling, and scoped logging.
+#![doc = include_str!("../README.md")]
 mod actor;
 mod clock;
 pub mod dto;
