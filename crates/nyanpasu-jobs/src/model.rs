@@ -36,6 +36,18 @@ impl JobError {
             message: message.into(),
         }
     }
+    pub(crate) fn bounded(mut self) -> Self {
+        fn trim(value: &mut String, limit: usize) {
+            let mut end = value.len().min(limit);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+        }
+        trim(&mut self.code, 128);
+        trim(&mut self.message, 4096);
+        self
+    }
     pub fn cancelled() -> Self {
         Self::new("cancelled", "Work acknowledged cancellation")
     }

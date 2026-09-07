@@ -11,3 +11,9 @@ pub mod storage;
 pub use storage::JobStore;
 #[cfg(feature = "redb-store")]
 pub use storage::RedbJobStore;
+
+mod encoding;
+mod job;
+pub use job::{Job, JobContext, JobDefinition};
+mod logging;
+pub use logging::{JobJournalLayer, LogCapture, LogPolicy};
