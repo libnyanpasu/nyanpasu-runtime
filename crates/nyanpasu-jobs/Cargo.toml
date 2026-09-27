@@ -33,3 +33,7 @@ specta-serde = "0.0.12"
 specta-typescript = "0.0.12"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
+
+[[example]]
+name = "manual"
+required-features = ["redb-store"]
