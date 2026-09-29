@@ -4,7 +4,7 @@ use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceManager, ServiceStatus,
 };
 
-use crate::consts::{APP_NAME, SERVICE_LABEL};
+use crate::consts::SERVICE_LABEL;
 
 use super::{CommandError, LocalIpcPolicyArg};
 
@@ -64,11 +64,7 @@ pub fn install_with(manager: &dyn ServiceManager, ctx: InstallCommand) -> Result
     if !service_config_dir.exists() {
         std::fs::create_dir_all(&service_config_dir)?;
     }
-    let binary_name = format!("{}{}", APP_NAME, std::env::consts::EXE_SUFFIX);
-    #[cfg(not(target_os = "linux"))]
-    let service_binary = service_data_dir.join(binary_name);
-    #[cfg(target_os = "linux")]
-    let service_binary = PathBuf::from("/usr/bin").join(binary_name);
+    let service_binary = crate::utils::dirs::service_binary_path();
     let current_binary = current_exe()?;
     // Prevent both src and target binary are the same
     // It possible happens when a app was installed by a linux package manager

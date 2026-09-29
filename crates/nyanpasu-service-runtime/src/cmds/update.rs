@@ -4,7 +4,7 @@ use nyanpasu_ipc::client::shortcuts;
 use semver::Version;
 use tokio::task::spawn_blocking;
 
-use crate::consts::{APP_NAME, APP_VERSION};
+use crate::consts::APP_VERSION;
 
 use super::CommandError;
 
@@ -90,8 +90,7 @@ pub async fn update(ctx: UpdateCommand) -> Result<(), CommandError> {
     let service_data_dir = crate::utils::dirs::service_data_dir();
     tracing::info!("Service data dir: {:?}", service_data_dir);
     tracing::info!("Client version: {}", APP_VERSION);
-    let service_binary =
-        service_data_dir.join(format!("{}{}", APP_NAME, std::env::consts::EXE_SUFFIX));
+    let service_binary = crate::utils::dirs::service_binary_path();
     let binary_exists = service_binary.exists();
     let client_version = Version::parse(APP_VERSION).unwrap();
     // Only ask the running service for its version when there is a binary to
