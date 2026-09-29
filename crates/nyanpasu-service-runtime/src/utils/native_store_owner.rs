@@ -51,7 +51,6 @@ impl FsOwnerBindingStore {
         Ok(())
     }
 
-    // TODO(#5326): inject this owner into the native store at service startup.
     pub fn load(&self) -> anyhow::Result<Option<UnixOwner>> {
         let file = match OpenOptions::new()
             .read(true)
