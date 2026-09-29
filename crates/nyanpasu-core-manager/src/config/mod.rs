@@ -35,6 +35,19 @@ pub(crate) struct PreparedConfig {
     pub effective_hash: String,
 }
 
+impl PreparedConfig {
+    pub(crate) fn native_paths(
+        &mut self,
+        kind: crate::CoreKind,
+        source: &Utf8Path,
+    ) -> Result<(), Error> {
+        crate::native_store::rewrite_paths(kind, &mut self.document, source);
+        self.bytes = serialize_mapping(&self.document)?;
+        self.effective_hash = semantic_hash(&self.bytes);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfigInfo {
     pub controller: Option<RawController>,

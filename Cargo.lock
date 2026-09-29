@@ -2094,6 +2094,7 @@ dependencies = [
  "clash-api",
  "enumset",
  "futures-util",
+ "libc",
  "nyanpasu-core-manager",
  "nyanpasu-core-metadata",
  "nyanpasu-utils",
