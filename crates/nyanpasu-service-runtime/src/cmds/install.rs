@@ -14,7 +14,7 @@ use super::{CommandError, LocalIpcPolicyArg};
 /// an elevated install.
 #[derive(Debug, clap::Args)]
 pub struct InstallCommand {
-    /// The user who will run the service
+    /// The desktop user whose native core data the privileged service manages
     #[clap(long, env = "NYANPASU_USER")]
     user: String, // Should manual specify because the runner should be administrator/root
     /// The nyanpasu data directory
@@ -64,6 +64,12 @@ pub fn install_with(manager: &dyn ServiceManager, ctx: InstallCommand) -> Result
     if !service_config_dir.exists() {
         std::fs::create_dir_all(&service_config_dir)?;
     }
+    #[cfg(unix)]
+    crate::utils::native_store_owner::FsOwnerBindingStore::new(
+        &service_config_dir,
+        &ctx.nyanpasu_data_dir,
+    )
+    .save(&ctx.user)?;
     let service_binary = crate::utils::dirs::service_binary_path();
     let current_binary = current_exe()?;
     // Prevent both src and target binary are the same

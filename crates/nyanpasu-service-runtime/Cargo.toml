@@ -98,6 +98,7 @@ rustc_version = "0.4"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
+tempfile = "3"
 whoami = "2"
 
 [target."cfg(windows)".dependencies]
