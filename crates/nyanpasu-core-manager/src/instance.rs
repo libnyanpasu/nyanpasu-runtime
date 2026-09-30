@@ -168,6 +168,7 @@ pub struct InstanceBuilder {
     pipe_security_descriptor: Option<String>,
     native_store: Option<Arc<dyn crate::native_store::StoreLease>>,
     source_data_dir: Option<camino::Utf8PathBuf>,
+    lifecycle_sink: Option<Arc<dyn crate::InstanceLifecycleSink>>,
 }
 
 impl Instance {
@@ -189,6 +190,7 @@ impl Instance {
             pipe_security_descriptor: None,
             native_store: None,
             source_data_dir: None,
+            lifecycle_sink: None,
         }
     }
 
@@ -214,6 +216,7 @@ impl Instance {
             pipe_security_descriptor,
             native_store,
             source_data_dir,
+            lifecycle_sink,
         } = builder;
         if tokio::fs::metadata(&spec.config_path).await.is_err() {
             return Err(Error::ConfigNotFound(spec.config_path.clone()));
@@ -353,6 +356,7 @@ impl Instance {
             liveness_probe,
             initial_deadline,
             probe_requests: probe_request_rx,
+            lifecycle_sink,
         }));
         *shared.monitor.lock().await = Some(monitor);
 
@@ -553,6 +557,11 @@ impl InstanceBuilder {
         self
     }
 
+    pub fn lifecycle_sink(mut self, sink: Option<Arc<dyn crate::InstanceLifecycleSink>>) -> Self {
+        self.lifecycle_sink = sink;
+        self
+    }
+
     pub(crate) fn pipe_security_descriptor(mut self, descriptor: Option<String>) -> Self {
         self.pipe_security_descriptor = descriptor;
         self
@@ -666,6 +675,7 @@ struct MonitorLoopArgs {
     liveness_probe: Option<ProbeHandle>,
     initial_deadline: Instant,
     probe_requests: mpsc::UnboundedReceiver<ProbeNowRequest>,
+    lifecycle_sink: Option<Arc<dyn crate::InstanceLifecycleSink>>,
 }
 
 async fn monitor_loop(args: MonitorLoopArgs) {
@@ -679,6 +689,7 @@ async fn monitor_loop(args: MonitorLoopArgs) {
         liveness_probe,
         initial_deadline,
         mut probe_requests,
+        lifecycle_sink,
     } = args;
     let (observation_tx, mut observations) = mpsc::unbounded_channel();
     let mut ever_ready = false;
@@ -689,6 +700,8 @@ async fn monitor_loop(args: MonitorLoopArgs) {
     let mut driver: Option<ProbeDriver> = None;
     let mut respawn_deadline: Option<Instant> = None;
     let mut last_exit: Option<TerminatedPayload> = None;
+    // Kept independently of readiness state: stop cancels probes before exit.
+    let mut live_instance_id = None;
 
     loop {
         let respawn_deadline_for_select = respawn_deadline.unwrap_or(initial_deadline);
@@ -707,8 +720,18 @@ async fn monitor_loop(args: MonitorLoopArgs) {
                     let started_at = std::time::Instant::now();
                     let previous_health = shared.state_tx.borrow().health.clone();
                     let lifecycle = shared.state_tx.borrow().state.clone();
+                    let instance_id = uuid::Uuid::new_v4();
+                    live_instance_id = Some(instance_id);
+                    if let Some(sink) = &lifecycle_sink {
+                        sink.publish(crate::InstanceLifecycleEvent::Started {
+                            instance_id,
+                            epoch,
+                            pid,
+                            observed_at_ms: now_ms(),
+                        });
+                    }
                     shared.publish_status(InstanceStatus {
-                        instance_id: Some(uuid::Uuid::new_v4()),
+                        instance_id: Some(instance_id),
                         state: lifecycle,
                         health: Some(reset_starting_health(previous_health.as_ref())),
                     });
@@ -746,6 +769,15 @@ async fn monitor_loop(args: MonitorLoopArgs) {
                     });
                 }
                 Some(SupervisorEvent::Exited(payload)) => {
+                    if let Some(instance_id) = live_instance_id.take() {
+                        if let Some(sink) = &lifecycle_sink {
+                            sink.publish(crate::InstanceLifecycleEvent::Exited {
+                                instance_id,
+                                epoch,
+                                observed_at_ms: now_ms(),
+                            });
+                        }
+                    }
                     stop_probe_driver(&mut driver).await;
                     current = None;
                     respawn_deadline = None;
@@ -1033,6 +1065,94 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_observes_short_lived_respawns_without_status_readers() {
+        struct Sink(parking_lot::Mutex<Vec<crate::InstanceLifecycleEvent>>);
+        impl crate::InstanceLifecycleSink for Sink {
+            fn publish(&self, event: crate::InstanceLifecycleEvent) {
+                self.0.lock().push(event);
+            }
+        }
+        let sink = Arc::new(Sink(parking_lot::Mutex::new(Vec::new())));
+        let (state_tx, state_rx) = watch::channel(InstanceStatus::initial());
+        let (probe_request_tx, probe_requests) = mpsc::unbounded_channel();
+        let probe_cancel = CancellationToken::new();
+        // Readiness cancellation must not erase the actual process identity.
+        probe_cancel.cancel();
+        let shared = Arc::new(Shared {
+            state_tx,
+            user_stop: AtomicBool::new(true),
+            probe_timeout: AtomicBool::new(false),
+            parser: parking_lot::Mutex::new(LogParser::new(kind::CoreKind::Mihomo, 1)),
+            log_tail: parking_lot::Mutex::new(VecDeque::new()),
+            log_tx: broadcast::channel(LOG_CHANNEL_CAPACITY).0,
+            cancel: CancellationToken::new(),
+            probe_cancel,
+            probe_request_tx,
+            supervisor: tokio::sync::Mutex::new(None),
+            monitor: tokio::sync::Mutex::new(None),
+            native_store: None,
+            core_kind: kind::CoreKind::Mihomo,
+            persistence_error: parking_lot::Mutex::new(None),
+        });
+        let (sender, events) = mpsc::unbounded_channel();
+        for event in [
+            SupervisorEvent::Started { pid: 42 },
+            SupervisorEvent::Exited(TerminatedPayload {
+                code: Some(1),
+                signal: None,
+            }),
+            SupervisorEvent::Started { pid: 42 },
+            SupervisorEvent::Exited(TerminatedPayload {
+                code: Some(0),
+                signal: None,
+            }),
+            SupervisorEvent::Stopped,
+        ] {
+            sender.send(event).unwrap();
+        }
+        drop(sender);
+        let controller = Arc::new(ResolvedController {
+            host: crate::Host::http("http://127.0.0.1:9090").unwrap(),
+            secret: Some("private".into()),
+        });
+        monitor_loop(MonitorLoopArgs {
+            events,
+            shared,
+            epoch: epoch(1),
+            options: InstanceOptions::default(),
+            controller,
+            readiness_probe: ProbeHandle::from_fn("unused", |_| async { ProbeResult::Healthy }),
+            liveness_probe: None,
+            initial_deadline: Instant::now() + Duration::from_secs(60),
+            probe_requests,
+            lifecycle_sink: Some(sink.clone()),
+        })
+        .await;
+        // The watch contains only terminal state, but both real runs survived.
+        assert!(state_rx.borrow().instance_id.is_none());
+        let notifications = sink.0.lock();
+        assert_eq!(notifications.len(), 4);
+        let ids: Vec<_> = notifications
+            .iter()
+            .map(|event| match event {
+                crate::InstanceLifecycleEvent::Started { instance_id, .. }
+                | crate::InstanceLifecycleEvent::Exited { instance_id, .. } => *instance_id,
+            })
+            .collect();
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(ids[2], ids[3]);
+        assert_ne!(ids[0], ids[2]);
+        assert!(matches!(
+            &notifications[0],
+            crate::InstanceLifecycleEvent::Started { pid: 42, .. }
+        ));
+        assert!(matches!(
+            &notifications[1],
+            crate::InstanceLifecycleEvent::Exited { .. }
+        ));
+    }
 
     fn run_state(run_id: u64, pid: u32, started_at: std::time::Instant) -> RunState {
         RunState {

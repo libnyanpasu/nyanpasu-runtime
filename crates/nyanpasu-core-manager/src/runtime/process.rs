@@ -21,6 +21,7 @@ use super::{BoxFuture, RuntimeBackend, RuntimeInstance, RuntimeLaunchRequest};
 /// manager builder; a custom backend owns its own probing instead.
 #[derive(Clone, Default)]
 pub(crate) struct ProbePlan {
+    pub(crate) lifecycle_sink: Option<std::sync::Arc<dyn crate::InstanceLifecycleSink>>,
     pub(crate) controller_access: Option<std::sync::Arc<dyn crate::ControllerAccess>>,
     pub(crate) readiness: Option<ProbeHandle>,
     pub(crate) liveness: Option<ProbeHandle>,
@@ -87,6 +88,7 @@ impl RuntimeBackend for ProcessRuntimeBackend {
                 controller.clone(),
                 self.cancel_token.clone(),
             )
+            .lifecycle_sink(self.probes.lifecycle_sink.clone())
             .log_sender(log_tx)
             .pipe_security_descriptor(descriptor)
             .native_store(
