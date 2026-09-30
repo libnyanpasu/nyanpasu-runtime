@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-service"
-version = "2.0.0-rc.10"
+version = "2.0.0-rc.9"
 dependencies = [
  "nyanpasu-service-runtime",
  "nyanpasu-utils",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-service-runtime"
-version = "2.0.0-rc.10"
+version = "2.0.0-rc.9"
 dependencies = [
  "ansi-str",
  "anyhow",
