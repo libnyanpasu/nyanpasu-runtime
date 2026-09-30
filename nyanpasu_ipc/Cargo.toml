@@ -11,6 +11,7 @@ required-features = ["client", "server"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+nyanpasu-traffic = { path = "../crates/nyanpasu-traffic" }
 nyanpasu-logging = { path = "../crates/nyanpasu-logging" }
 nyanpasu-core-metadata = { path = "../crates/nyanpasu-core-metadata" }
 nyanpasu-utils = {
@@ -52,7 +53,7 @@ nyanpasu-windows-security = { path = "../crates/nyanpasu-windows-security" }
 [features]
 client = ["dep:futures-util", "dep:reqwest", "dep:reqwest-websocket", "nyanpasu-utils/reqwest"]
 server = ["dep:axum", "dep:axum-extra", "dep:tower", "dep:widestring"]
-specta = ["dep:specta", "nyanpasu-utils/specta", "nyanpasu-logging/specta"]
+specta = ["dep:specta", "nyanpasu-utils/specta", "nyanpasu-logging/specta", "nyanpasu-traffic/specta"]
 
 # The pipe-inspection example calls Win32 directly.
 [target."cfg(windows)".dev-dependencies]

@@ -294,6 +294,7 @@ type SharedCapture = Arc<Mutex<Option<CapturedRequest>>>;
 fn test_status_body() -> StatusResBody<'static> {
     StatusResBody {
         log_query_version: None,
+        traffic_query_version: None,
         version: Cow::Borrowed(TEST_VERSION),
         core_infos: CoreInfos {
             instance_id: None,
@@ -923,6 +924,116 @@ async fn a_server_error_kind_reaches_the_client() {
         other => panic!("expected a classified server error, got: {other:?}"),
     }
 
+    let _ = shutdown.send(());
+    cleanup(&placeholder);
+}
+
+#[tokio::test]
+async fn traffic_protocol_roundtrips_large_integers_and_latest_subscription_over_local_transport() {
+    use nyanpasu_ipc::{
+        api::{
+            contract::{TrafficSession, TrafficUsage},
+            traffic::*,
+        },
+        server::RegisterOperation,
+    };
+    use nyanpasu_traffic::*;
+    let session:SessionRecord=serde_json::from_value(serde_json::json!({
+        "id":"session","host":"service","instance_id":"actual-instance","process_started_at":null,"attached_at":"1000","first_sample_at":"1000","last_sample_at":"2000","ended_at":null,
+        "core_reported_bytes":{"upload":"9007199254740993","download":"7"},"attributed_bytes":{"upload":"9007199254740993","download":"7"},"time_unallocated":{"upload":"9007199254740993","download":"7"},
+        "global_counters":{"upload":"9007199254740993","download":"7"},"last_monotonic_ns":"2000000000","source_generation":"1","position":{"sequence":"2","digest":"fixture"},"quality":["TimeUnallocated"],"freshness":"Fresh","observed_connections":"1"
+    })).unwrap();
+    let fixture = session.clone();
+    let summary = TrafficSummary {
+        session: session.clone(),
+        revision: UInt(2),
+        current_rate: Some(Rate {
+            upload: 0.0,
+            download: 0.0,
+        }),
+        active_connections: UInt(0),
+        member_rates: Default::default(),
+        discrepancy: session.discrepancy(),
+    };
+    let expected_summary = summary.clone();
+    let fixture_usage = UsageResult {
+        meta: QueryMeta {
+            session: session.clone(),
+            cross_page_snapshot: false,
+        },
+        total: session.attributed_bytes.clone(),
+        groups: vec![],
+        other: nyanpasu_traffic::Bytes::default(),
+        time_unallocated: session.time_unallocated.clone(),
+        minutes: vec![],
+        current_rate: None,
+    };
+    let expected_usage = fixture_usage.clone();
+    let router = Router::new()
+        .route(
+            STATUS_ENDPOINT,
+            get(|| async {
+                let mut status = test_status_body();
+                status.traffic_query_version = Some(TRAFFIC_QUERY_VERSION);
+                Json(RBuilder::success(status))
+            }),
+        )
+        .register(TrafficSession, move |Json(request): Json<SessionId>| {
+            let fixture = fixture.clone();
+            async move {
+                assert_eq!(request, fixture.id);
+                Json(RBuilder::success(Ok::<_, StoreError>(fixture)))
+            }
+        })
+        .register(TrafficUsage, move |Json(request): Json<UsageQuery>| {
+            let fixture = fixture_usage.clone();
+            async move {
+                assert_eq!(request.session_id, fixture.meta.session.id);
+                Json(RBuilder::success(Ok::<_, StoreError>(fixture)))
+            }
+        })
+        .route(
+            TRAFFIC_SUMMARY_ENDPOINT,
+            get(move |ws: WebSocketUpgrade| {
+                let summary = summary.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        socket
+                            .send(Message::Binary(
+                                serde_json::to_vec(&Some(summary)).unwrap().into(),
+                            ))
+                            .await
+                            .unwrap();
+                        let _ = socket.recv().await;
+                    })
+                }
+            }),
+        );
+    let placeholder = format!("nyanpasu-ipc-test-{}-traffic", std::process::id());
+    let Some((shutdown, client)) = run_server(&placeholder, router).await else {
+        return;
+    };
+    assert_eq!(
+        client.traffic_session(&session.id).await.unwrap().unwrap(),
+        session
+    );
+    let usage = UsageQuery {
+        session_id: session.id.clone(),
+        filter: Default::default(),
+        scope: QueryScope::Session,
+        group_by: None,
+        limit: 100,
+    };
+    assert_eq!(
+        client.query_traffic_usage(&usage).await.unwrap().unwrap(),
+        expected_usage
+    );
+    let mut stream = client.subscribe_traffic_summary().await.unwrap();
+    assert_eq!(
+        stream.next().await.unwrap().unwrap().unwrap(),
+        expected_summary
+    );
+    drop(stream);
     let _ = shutdown.send(());
     cleanup(&placeholder);
 }

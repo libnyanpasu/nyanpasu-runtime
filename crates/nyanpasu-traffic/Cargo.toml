@@ -1,0 +1,37 @@
+[package]
+name = "nyanpasu-traffic"
+version = "1.0.0-rc.7"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[features]
+default = ["redb-store"]
+redb-store = ["dep:redb"]
+turso-store = ["dep:turso"]
+specta = ["dep:specta"]
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono.workspace = true
+clash-api = { path = "../clash-api" }
+futures-util.workspace = true
+ractor = "0.16"
+serde.workspace = true
+serde_json = "1"
+sha2 = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+redb = { version = "4.2", optional = true }
+turso = { version = "=0.8.1", default-features = false, optional = true }
+specta = { version = "^2.0.0-rc.25", features = ["derive", "serde_json"], optional = true }
+
+[dev-dependencies]
+sysinfo = "0.39"
+nyanpasu-traffic = { path = ".", default-features = false, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+specta-typescript = "0.0.12"
+specta-serde = "0.0.12"
+tempfile = "3"

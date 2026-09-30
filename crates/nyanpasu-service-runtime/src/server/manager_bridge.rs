@@ -195,17 +195,38 @@ impl CoreManagerService {
         .await
     }
 
+    #[cfg(test)]
     pub async fn with_controller_access(
         dirs: ServiceDirs,
         local_ipc_policy: LocalIpcPolicy,
         controller_dir: Option<Utf8PathBuf>,
         access: Arc<dyn nyanpasu_core_manager::ControllerAccess>,
     ) -> Result<Self, anyhow::Error> {
+        Self::with_lifecycle(
+            dirs,
+            local_ipc_policy,
+            controller_dir,
+            access,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub async fn with_lifecycle(
+        dirs: ServiceDirs,
+        local_ipc_policy: LocalIpcPolicy,
+        controller_dir: Option<Utf8PathBuf>,
+        access: Arc<dyn nyanpasu_core_manager::ControllerAccess>,
+        lifecycle: Option<Arc<dyn nyanpasu_core_manager::InstanceLifecycleSink>>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Self, anyhow::Error> {
         let digest = nyanpasu_core_manager::payload_digest(dirs.runtime.as_str().as_bytes());
         // Leave room for the directory and epoch within sockaddr_un on macOS.
         let namespace = &digest[..16];
         let source_dir = dirs.runtime.join("v2-sources");
-        let manager = Manager::builder(ManagerOptions {
+        let mut builder = Manager::builder(ManagerOptions {
+            cancel_token: cancellation,
             controller_dir,
             #[cfg(unix)]
             controller_template: Some(format!("core-{namespace}-{{epoch}}.sock")),
@@ -215,9 +236,11 @@ impl CoreManagerService {
             local_ipc_policy,
             ..ManagerOptions::default()
         })
-        .controller_access(access)
-        .build()
-        .await?;
+        .controller_access(access);
+        if let Some(sink) = lifecycle {
+            builder = builder.lifecycle_sink(sink);
+        }
+        let manager = builder.build().await?;
         let core_control =
             CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, dirs.data));
         Ok(Self {
@@ -230,6 +253,14 @@ impl CoreManagerService {
                 check_slots: Semaphore::new(MAX_CONCURRENT_CHECKS),
             }),
         })
+    }
+
+    pub fn subscribe_status(&self) -> watch::Receiver<CoreStatus> {
+        self.inner.manager.subscribe()
+    }
+
+    pub fn subscribe_config_commits(&self) -> nyanpasu_core_manager::ConfigCommitSubscription {
+        self.inner.manager.subscribe_config_commits()
     }
 
     /// State → ws events, and core logs → both the ws log ring and tracing.

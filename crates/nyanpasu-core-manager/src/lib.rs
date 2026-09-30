@@ -14,6 +14,8 @@ mod error;
 mod health;
 pub mod instance;
 pub mod kind;
+mod lifecycle;
+pub use lifecycle::{InstanceLifecycleEvent, InstanceLifecycleSink};
 mod log;
 mod log_sink;
 pub mod manager;

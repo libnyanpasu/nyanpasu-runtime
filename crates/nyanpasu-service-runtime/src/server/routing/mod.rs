@@ -10,6 +10,7 @@ pub mod logs;
 mod middleware;
 pub mod network;
 pub mod status;
+pub mod traffic;
 pub mod ws;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub struct AppState {
     pub runtime: Arc<RuntimeInfos>,
     pub logger: Logger<'static>,
     pub logs: nyanpasu_logging::LogsClient,
+    pub traffic: Result<nyanpasu_traffic::TrafficClient, nyanpasu_traffic::StoreError>,
 }
 
 #[instrument(skip(state))]
@@ -36,10 +38,12 @@ pub fn create_router(state: AppState) -> Router {
         .merge(core::setup())
         .merge(logs::setup())
         .merge(network::setup())
+        .merge(traffic::queries())
         .layer(axum::middleware::from_fn(middleware::enforce_timeout));
     Router::new()
         .merge(operations)
         .merge(ws::setup())
+        .merge(traffic::subscriptions())
         .layer(tracing_layer)
         // Successful viewer polls must not generate more service log records.
         .merge(logs::sessions())

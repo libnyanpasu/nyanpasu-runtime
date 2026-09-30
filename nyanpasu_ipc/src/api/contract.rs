@@ -252,3 +252,50 @@ mod tests {
         );
     }
 }
+
+pub struct TrafficSession;
+impl IpcOperation for TrafficSession {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::traffic::TRAFFIC_SESSION_ENDPOINT;
+    type Req<'a> = nyanpasu_traffic::SessionId;
+    type Data = nyanpasu_traffic::TrafficResult<nyanpasu_traffic::SessionRecord>;
+}
+
+pub struct TrafficConnections;
+impl IpcOperation for TrafficConnections {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::traffic::TRAFFIC_CONNECTIONS_ENDPOINT;
+    type Req<'a> = nyanpasu_traffic::ConnectionsQuery;
+    type Data = nyanpasu_traffic::TrafficResult<nyanpasu_traffic::ConnectionPage>;
+}
+
+pub struct TrafficUsage;
+impl IpcOperation for TrafficUsage {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::traffic::TRAFFIC_USAGE_ENDPOINT;
+    type Req<'a> = nyanpasu_traffic::UsageQuery;
+    type Data = nyanpasu_traffic::TrafficResult<nyanpasu_traffic::UsageResult>;
+}
+
+pub struct TrafficTopology;
+impl IpcOperation for TrafficTopology {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::traffic::TRAFFIC_TOPOLOGY_ENDPOINT;
+    type Req<'a> = nyanpasu_traffic::TopologyQuery;
+    type Data = nyanpasu_traffic::TrafficResult<nyanpasu_traffic::TopologyResult>;
+}
+
+pub struct TrafficCurrentSession;
+impl IpcOperation for TrafficCurrentSession {
+    const METHOD: Method = Method::GET;
+    const PATH: &'static str = super::traffic::TRAFFIC_CURRENT_SESSION_ENDPOINT;
+    type Req<'a> = ();
+    type Data = nyanpasu_traffic::TrafficResult<Option<nyanpasu_traffic::SessionRecord>>;
+}
+pub struct TrafficStatus;
+impl IpcOperation for TrafficStatus {
+    const METHOD: Method = Method::GET;
+    const PATH: &'static str = super::traffic::TRAFFIC_STATUS_ENDPOINT;
+    type Req<'a> = ();
+    type Data = nyanpasu_traffic::TrafficResult<()>;
+}

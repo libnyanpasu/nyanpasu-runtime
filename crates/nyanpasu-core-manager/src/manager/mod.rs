@@ -261,6 +261,13 @@ impl CoreManagerBuilder {
         self
     }
 
+    /// Attaches an ordered observer before any actual process can start.
+    /// Custom runtime backends own lifecycle delivery themselves.
+    pub fn lifecycle_sink(mut self, sink: Arc<dyn crate::InstanceLifecycleSink>) -> Self {
+        self.probes.lifecycle_sink = Some(sink);
+        self
+    }
+
     /// Injects the host DNS override component (amendment A5 ③). Without one
     /// the manager has zero DNS behavior.
     pub fn dns_controller(mut self, dns: Arc<dyn DnsController>) -> Self {
@@ -301,6 +308,11 @@ impl CoreManager {
             dns,
             controller_access,
         } = builder;
+        if backend.is_some() && probes.lifecycle_sink.is_some() {
+            return Err(Error::InvalidManagerOptions(
+                "custom runtime backends must wire ordered lifecycle delivery themselves; lifecycle_sink configures only the process backend".into(),
+            ));
+        }
         let runtime_dir = options
             .runtime_dir
             .clone()
@@ -820,6 +832,40 @@ fn spawn_forwarder(
 mod tests {
     use super::EpochAllocator;
     use crate::epoch::epoch;
+
+    #[tokio::test]
+    async fn custom_backend_cannot_silently_discard_process_lifecycle_sink() {
+        struct Backend;
+        impl crate::RuntimeBackend for Backend {
+            fn launch(
+                &self,
+                _: crate::RuntimeLaunchRequest,
+            ) -> crate::runtime::BoxFuture<'_, Result<Box<dyn crate::RuntimeInstance>, crate::Error>>
+            {
+                Box::pin(async { panic!("construction must reject before launch") })
+            }
+            fn check_config<'a>(
+                &'a self,
+                _: &'a crate::InstanceSpec,
+            ) -> crate::runtime::BoxFuture<'a, Result<(), crate::Error>> {
+                Box::pin(async { panic!("construction must reject before validation") })
+            }
+        }
+        struct Sink;
+        impl crate::InstanceLifecycleSink for Sink {
+            fn publish(&self, _: crate::InstanceLifecycleEvent) {
+                panic!("no process can be started")
+            }
+        }
+        let result = super::CoreManager::builder(crate::ManagerOptions::default())
+            .runtime_backend(std::sync::Arc::new(Backend))
+            .lifecycle_sink(std::sync::Arc::new(Sink))
+            .build()
+            .await;
+        assert!(
+            matches!(result,Err(crate::Error::InvalidManagerOptions(message)) if message.contains("custom runtime backends"))
+        );
+    }
 
     #[test]
     fn epochs_are_monotone_past_the_seed_and_never_zero() {

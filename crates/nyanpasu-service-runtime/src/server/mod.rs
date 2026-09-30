@@ -4,6 +4,7 @@ mod events;
 mod logger;
 mod manager_bridge;
 mod routing;
+mod traffic;
 
 use std::sync::Arc;
 
@@ -34,7 +35,15 @@ pub async fn run(
         .map_err(|path| anyhow::anyhow!("nyanpasu data dir is not UTF-8: {}", path.display()))?;
     let (controller_dir, access): (_, Arc<dyn nyanpasu_core_manager::ControllerAccess>) =
         controller_access_for_host(sids)?;
-    let core_manager = CoreManager::with_controller_access(
+    let traffic = traffic::start(runtime.service_data_dir.join("traffic"), token.clone()).await;
+    if let Err(error) = &traffic {
+        tracing::error!(%error, "service traffic recording unavailable");
+    }
+    let lifecycle = traffic.as_ref().ok().map(|client| {
+        Arc::new(traffic::LifecycleSink(client.clone()))
+            as Arc<dyn nyanpasu_core_manager::InstanceLifecycleSink>
+    });
+    let core_manager = CoreManager::with_lifecycle(
         ServiceDirs {
             runtime: runtime_dir,
             data: data_dir,
@@ -42,8 +51,23 @@ pub async fn run(
         local_ipc_policy,
         controller_dir,
         access,
+        lifecycle,
+        token.clone(),
     )
     .await?;
+    let traffic_tasks = tokio_util::task::TaskTracker::new();
+    if let Ok(client) = &traffic {
+        traffic_tasks.spawn(traffic::selection_bridge(
+            core_manager.subscribe_status(),
+            client.clone(),
+            token.clone(),
+        ));
+        traffic_tasks.spawn(traffic::context_bridge(
+            core_manager.subscribe_config_commits(),
+            client.clone(),
+            token.clone(),
+        ));
+    }
     let hub = EventHub::new();
     core_manager.spawn_bridges(hub.clone());
 
@@ -67,6 +91,7 @@ pub async fn run(
         runtime: Arc::new(runtime),
         logger,
         logs: logs.clone(),
+        traffic: traffic.clone(),
     };
     let app = create_router(state);
     tracing::info!("Starting server...");
@@ -80,35 +105,50 @@ pub async fn run(
         sids,
     );
     tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => {
-            let _ = logs.shutdown().await;
-            core_manager.shutdown().await;
-            result?;
-        }
-        _ = token.cancelled() => {
-            let _ = logs.shutdown().await;
-            core_manager.shutdown().await;
-            drain(&mut server).await?;
-        }
-        // The control plane owns every core transaction. If its executor is
-        // gone the daemon cannot serve `/v2/core/*` truthfully, so it stops
-        // rather than answering with a control plane that is not there.
-        exit = core_manager.until_control_closed() => {
-            let _ = logs.shutdown().await;
-            if exit == ExecutorExit::Died {
-                tracing::error!("the core control executor died; shutting the service down");
+    let outcome: anyhow::Result<()> = async {
+        tokio::select! {
+            result = &mut server => {
+                let _ = logs.shutdown().await;
+                core_manager.shutdown().await;
+                result?;
+            }
+            _ = token.cancelled() => {
+                let _ = logs.shutdown().await;
                 core_manager.shutdown().await;
                 drain(&mut server).await?;
-                anyhow::bail!("the core control executor died");
             }
-            // Clean: a local shutdown already ran. Nothing maps `Shutdown` onto
-            // the wire, so this is the service's own teardown finishing.
-            core_manager.shutdown().await;
-            drain(&mut server).await?;
+            // The control plane owns every core transaction. If its executor is
+            // gone the daemon cannot serve `/v2/core/*` truthfully, so it stops
+            // rather than answering with a control plane that is not there.
+            exit = core_manager.until_control_closed() => {
+                let _ = logs.shutdown().await;
+                if exit == ExecutorExit::Died {
+                    tracing::error!("the core control executor died; shutting the service down");
+                    core_manager.shutdown().await;
+                    drain(&mut server).await?;
+                    anyhow::bail!("the core control executor died");
+                }
+                // Clean: a local shutdown already ran. Nothing maps `Shutdown` onto
+                // the wire, so this is the service's own teardown finishing.
+                core_manager.shutdown().await;
+                drain(&mut server).await?;
+            }
+        }
+        Ok(())
+    }
+    .await;
+    token.cancel();
+    traffic_tasks.close();
+    traffic_tasks.wait().await;
+    if let Ok(client) = traffic {
+        if let Err(error) = client.shutdown().await {
+            if outcome.is_ok() {
+                return Err(anyhow::Error::new(error));
+            }
+            tracing::error!(%error,"traffic shutdown failed after service failure");
         }
     }
-    Ok(())
+    outcome
 }
 
 async fn drain<E: std::error::Error + Send + Sync + 'static>(

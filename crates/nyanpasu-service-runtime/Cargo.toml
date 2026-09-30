@@ -17,6 +17,7 @@ build = "build.rs"
 name = "nyanpasu_service"
 
 [dependencies]
+nyanpasu-traffic = { path = "../nyanpasu-traffic", features = ["redb-store"] }
 nyanpasu-logging = { path = "../nyanpasu-logging" }
 nyanpasu-core-manager = { path = "../nyanpasu-core-manager" }
 nyanpasu-ipc = {

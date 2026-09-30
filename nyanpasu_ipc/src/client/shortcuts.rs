@@ -275,3 +275,223 @@ mod api_connection_tests {
         }
     }
 }
+
+impl Client {
+    pub async fn ensure_traffic_supported(&self) -> Result<()> {
+        if tokio::time::timeout(std::time::Duration::from_secs(30), self.status())
+            .await
+            .map_err(|_| ClientError::TrafficDeadline)??
+            .traffic_query_version
+            == Some(api::traffic::TRAFFIC_QUERY_VERSION)
+        {
+            Ok(())
+        } else {
+            Err(ClientError::UnsupportedTraffic)
+        }
+    }
+    pub async fn traffic_session(
+        &self,
+        request: &nyanpasu_traffic::SessionId,
+    ) -> Result<nyanpasu_traffic::TrafficResult<nyanpasu_traffic::SessionRecord>> {
+        self.ensure_traffic_supported().await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficSession>(Some(request)),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: <api::contract::TrafficSession as api::contract::IpcOperation>::PATH,
+        })
+    }
+    pub async fn query_traffic_connections(
+        &self,
+        request: &nyanpasu_traffic::ConnectionsQuery,
+    ) -> Result<nyanpasu_traffic::TrafficResult<nyanpasu_traffic::ConnectionPage>> {
+        self.ensure_traffic_supported().await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficConnections>(Some(request)),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: <api::contract::TrafficConnections as api::contract::IpcOperation>::PATH,
+        })
+    }
+    pub async fn query_traffic_usage(
+        &self,
+        request: &nyanpasu_traffic::UsageQuery,
+    ) -> Result<nyanpasu_traffic::TrafficResult<nyanpasu_traffic::UsageResult>> {
+        self.ensure_traffic_supported().await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficUsage>(Some(request)),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: <api::contract::TrafficUsage as api::contract::IpcOperation>::PATH,
+        })
+    }
+    pub async fn query_traffic_topology(
+        &self,
+        request: &nyanpasu_traffic::TopologyQuery,
+    ) -> Result<nyanpasu_traffic::TrafficResult<nyanpasu_traffic::TopologyResult>> {
+        self.ensure_traffic_supported().await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficTopology>(Some(request)),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: <api::contract::TrafficTopology as api::contract::IpcOperation>::PATH,
+        })
+    }
+}
+
+impl Client {
+    pub async fn subscribe_traffic_summary(
+        &self,
+    ) -> Result<TrafficStream<nyanpasu_traffic::TrafficSummary>> {
+        self.traffic_stream(api::traffic::TRAFFIC_SUMMARY_ENDPOINT)
+            .await
+    }
+    pub async fn subscribe_traffic_details(
+        &self,
+    ) -> Result<TrafficStream<nyanpasu_traffic::TrafficDetails>> {
+        self.traffic_stream(api::traffic::TRAFFIC_DETAILS_ENDPOINT)
+            .await
+    }
+    async fn traffic_stream<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        endpoint: &'static str,
+    ) -> Result<TrafficStream<T>> {
+        self.ensure_traffic_supported().await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.get(endpoint).upgrade_with_named_pipe_retry(),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)?
+        .map_err(|source| ClientError::WebSocket {
+            operation: endpoint,
+            source,
+        })?;
+        let websocket =
+            response
+                .into_websocket()
+                .await
+                .map_err(|source| ClientError::WebSocket {
+                    operation: endpoint,
+                    source,
+                })?;
+        let stream = websocket.filter_map(move |message| async move {
+            let bytes = match message {
+                Ok(Message::Binary(bytes)) => bytes,
+                Ok(Message::Text(text)) => text.into(),
+                Ok(_) => return None,
+                Err(source) => {
+                    return Some(Err(ClientError::WebSocket {
+                        operation: endpoint,
+                        source,
+                    }));
+                }
+            };
+            Some(
+                serde_json::from_slice(&bytes).map_err(|source| ClientError::Decode {
+                    operation: endpoint,
+                    source,
+                }),
+            )
+        });
+        Ok(TrafficStream {
+            inner: Box::pin(stream),
+        })
+    }
+}
+/// Latest domain observations; this stream is not the durable accounting log.
+pub struct TrafficStream<T> {
+    inner: Pin<Box<dyn Stream<Item = Result<Option<T>>> + Send>>,
+}
+impl<T> Stream for TrafficStream<T> {
+    type Item = Result<Option<T>>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_next_unpin(cx)
+    }
+}
+
+impl Client {
+    pub async fn current_traffic_session(
+        &self,
+    ) -> Result<nyanpasu_traffic::TrafficResult<Option<nyanpasu_traffic::SessionRecord>>> {
+        self.ensure_traffic_supported().await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficCurrentSession>(None),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: api::traffic::TRAFFIC_CURRENT_SESSION_ENDPOINT,
+        })
+    }
+    pub async fn traffic_status(&self) -> Result<nyanpasu_traffic::TrafficResult<()>> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.call::<api::contract::TrafficStatus>(None),
+        )
+        .await
+        .map_err(|_| ClientError::TrafficDeadline)??
+        .data
+        .ok_or(ClientError::EmptyData {
+            operation: api::traffic::TRAFFIC_STATUS_ENDPOINT,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod traffic_tests {
+    use super::*;
+    #[tokio::test]
+    async fn old_service_is_unsupported_without_requesting_a_collector() {
+        use axum::{Json, Router, routing::get};
+        let payload = serde_json::json!({"code":"Ok","msg":"ok","ts":1,"data":{
+          "version":"old-service","core_infos":{"type":null,"state":{"Stopped":null},"state_changed_at":0,"config_path":null},
+          "runtime_infos":{"service_data_dir":"data","service_config_dir":"config","nyanpasu_config_dir":"config","nyanpasu_data_dir":"data"}
+        }});
+        let router = Router::new().route(
+            "/status",
+            get(move || {
+                let payload = payload.clone();
+                async move { Json(payload) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = Client {
+            client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            base_url: format!("http://{address}/").parse().unwrap(),
+        };
+        assert!(matches!(
+            client
+                .traffic_session(&nyanpasu_traffic::SessionId("unknown".into()))
+                .await,
+            Err(ClientError::UnsupportedTraffic)
+        ));
+        assert!(matches!(
+            client.subscribe_traffic_summary().await,
+            Err(ClientError::UnsupportedTraffic)
+        ));
+        server.abort();
+    }
+}

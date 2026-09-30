@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/nyanpasu-jobs",
+  "crates/nyanpasu-traffic",
   "crates/nyanpasu-logging",
   "crates/nyanpasu-windows-security",
   "crates/clash-api",

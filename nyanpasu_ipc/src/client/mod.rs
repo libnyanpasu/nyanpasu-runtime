@@ -24,6 +24,10 @@ const LOCAL_TRANSPORT_BASE_URL: &str = "http://nyanpasu-service.localipc/";
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ClientError {
+    #[error("traffic IPC deadline exceeded")]
+    TrafficDeadline,
+    #[error("the service does not support traffic protocol v1")]
+    UnsupportedTraffic,
     #[error("failed to build the IPC client: {0}")]
     BuildClient(#[source] reqwest::Error),
     #[error("IPC request `{operation}` failed: {source}")]

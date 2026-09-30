@@ -63,6 +63,9 @@ impl TestEnv {
             nyanpasu_app_dir: root.join("nyanpasu-app"),
         });
         let state = AppState {
+            traffic: Err(nyanpasu_traffic::StoreError::Unavailable(
+                "test host".into(),
+            )),
             core_manager,
             hub: EventHub::new(),
             runtime,
@@ -828,4 +831,183 @@ async fn effective_config_contract_returns_no_snapshot_when_stopped() {
     > = body_of(response).await;
     assert_eq!(envelope.code, ResponseCode::Ok);
     assert!(envelope.data.flatten().is_none());
+}
+
+#[tokio::test]
+async fn traffic_history_survives_desktop_detach_and_matches_local_queries() {
+    use nyanpasu_ipc::api::{R, traffic::*};
+    use nyanpasu_traffic::*;
+    let mut env = TestEnv::new().await;
+    let traffic = crate::server::traffic::start(
+        env._dir.path().join("traffic"),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    env.state.traffic = Ok(traffic.clone());
+    let new = NewSession {
+        host: HostId("service".into()),
+        instance_id: "real-process".into(),
+        process_started_at: None,
+        attached_at: UInt(1000),
+        late_attach: false,
+    };
+    let session = traffic.instance_started(new).await.unwrap();
+    let bytes = 9_007_199_254_740_993_i64;
+    let sample = ConnectionSample {
+        id: "closed-while-ui-absent".into(),
+        started_at: Some("2026-09-30T00:00:00Z".into()),
+        metadata: Default::default(),
+        extra: Default::default(),
+        upload: bytes,
+        download: 7,
+        rule: "MATCH".into(),
+        rule_payload: String::new(),
+        chains: vec!["DIRECT".into()],
+        provider_chains: vec![],
+    };
+    // No UI receiver or IPC connection exists during either committed frame.
+    traffic
+        .observe(Observation {
+            instance_id: session.instance_id.clone(),
+            generation: UInt(0),
+            wall_time: UInt(1000),
+            monotonic_ns: UInt(1_000_000_000),
+            upload_total: bytes,
+            download_total: 7,
+            connections: vec![sample],
+        })
+        .await
+        .unwrap();
+    traffic
+        .observe(Observation {
+            instance_id: session.instance_id.clone(),
+            generation: UInt(0),
+            wall_time: UInt(2000),
+            monotonic_ns: UInt(2_000_000_000),
+            upload_total: bytes,
+            download_total: 7,
+            connections: vec![],
+        })
+        .await
+        .unwrap();
+    let query = ConnectionsQuery {
+        session_id: session.id.clone(),
+        filter: ConnectionFilter::default(),
+        limit: 1,
+        cursor: None,
+    };
+    let local = traffic.query_connections(query.clone()).await.unwrap();
+    assert!(matches!(
+        local.connections[0].status,
+        ConnectionStatus::Closed { .. }
+    ));
+    let post = |endpoint: &str, value: serde_json::Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(value.to_string()))
+            .unwrap()
+    };
+    let app = create_router(env.state.clone());
+    let response = app
+        .clone()
+        .oneshot(post(
+            TRAFFIC_CONNECTIONS_ENDPOINT,
+            serde_json::to_value(&query).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let wire: R<'static, TrafficResult<ConnectionPage>> = body_of(response).await;
+    assert_eq!(wire.data.unwrap().unwrap(), local);
+    // Desktop disconnect drops its router; service owner remains alive.
+    drop(app);
+    let app = create_router(env.state.clone());
+    let usage = UsageQuery {
+        session_id: session.id.clone(),
+        filter: ConnectionFilter::default(),
+        scope: QueryScope::Session,
+        group_by: Some(GroupBy::Rule),
+        limit: 100,
+    };
+    let local = traffic.query_usage(usage.clone()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(post(
+            TRAFFIC_USAGE_ENDPOINT,
+            serde_json::to_value(&usage).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let raw = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert!(
+        std::str::from_utf8(&raw)
+            .unwrap()
+            .contains("\"9007199254740993\"")
+    );
+    let wire: R<'static, TrafficResult<UsageResult>> = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(wire.data.unwrap().unwrap(), local);
+    let topology = TopologyQuery {
+        session_id: session.id.clone(),
+        filter: ConnectionFilter::default(),
+        scope: QueryScope::Session,
+        limit: 100,
+    };
+    let local = traffic.query_topology(topology.clone()).await.unwrap();
+    let response = app
+        .oneshot(post(
+            TRAFFIC_TOPOLOGY_ENDPOINT,
+            serde_json::to_value(&topology).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let wire: R<'static, TrafficResult<TopologyResult>> = body_of(response).await;
+    assert_eq!(wire.data.unwrap().unwrap(), local);
+    traffic.shutdown().await.unwrap();
+    env.state.logs.shutdown().await.unwrap();
+    env.state.core_manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn traffic_storage_failure_remains_explicit_without_hiding_protocol_capability() {
+    use nyanpasu_ipc::api::{R, traffic::*};
+    use nyanpasu_traffic::*;
+    let env = TestEnv::new().await;
+    let app = create_router(env.state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(STATUS_ENDPOINT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status: StatusRes<'static> = body_of(response).await;
+    assert_eq!(
+        status.data.unwrap().traffic_query_version,
+        Some(nyanpasu_ipc::api::traffic::TRAFFIC_QUERY_VERSION)
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(TRAFFIC_SESSION_ENDPOINT)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&SessionId("session".into())).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reply: R<'static, TrafficResult<SessionRecord>> = body_of(response).await;
+    assert!(matches!(
+        reply.data.unwrap(),
+        Err(StoreError::Unavailable(_))
+    ));
+    env.state.logs.shutdown().await.unwrap();
+    env.state.core_manager.shutdown().await;
 }
