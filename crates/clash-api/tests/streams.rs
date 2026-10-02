@@ -176,6 +176,55 @@ async fn dropping_a_subscription_releases_its_idle_socket() {
     server.abort();
 }
 
+#[tokio::test]
+async fn log_messages_are_bounded_without_restricting_connection_snapshots() {
+    async fn logs(
+        Query(query): Query<IndexMap<String, String>>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        assert_eq!(query.get("level").map(String::as_str), Some("debug"));
+        ws.on_upgrade(|mut socket| async move {
+            let frame =
+                serde_json::json!({ "type": "debug", "payload": "x".repeat(2 * 1024 * 1024) })
+                    .to_string();
+            let _ = socket.send(AxumMessage::Text(frame.into())).await;
+        })
+    }
+    async fn connections(ws: WebSocketUpgrade) -> impl IntoResponse {
+        ws.on_upgrade(|mut socket| async move {
+            let frame = serde_json::json!({ "downloadTotal": 1, "uploadTotal": 2, "connections": null, "extension": "x".repeat(2 * 1024 * 1024) }).to_string();
+            let _ = socket.send(AxumMessage::Text(frame.into())).await;
+        })
+    }
+    let (address, server) = spawn_server(
+        Router::new()
+            .route("/logs", get(logs))
+            .route("/connections", get(connections)),
+    )
+    .await;
+    let client = Client::new_http(address).unwrap();
+    let mut logs = client
+        .logs_ws(LogQuery::new(LogLevel::Debug))
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(3), logs.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(error, clash_api::Error::WebSocketRead { source: reqwest_websocket::Error::Tungstenite(ref error), .. } if format!("{error:?}").contains("Capacity"))
+    );
+    let mut connections = client.connections_ws(Default::default()).await.unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(3), connections.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.download_total, 1);
+    server.abort();
+}
+
 #[test]
 fn common_connections_preserve_absence_unknown_enums_and_extensions() {
     let input = serde_json::json!({

@@ -177,7 +177,7 @@ impl Client {
     pub async fn events(&self) -> Result<EventStream> {
         let response = self
             .get(EVENT_URI)
-            .upgrade_with_named_pipe_retry()
+            .upgrade_with_named_pipe_retry(None)
             .await
             .map_err(|source| ClientError::WebSocket {
                 operation: EVENT_URI,

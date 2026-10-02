@@ -7,6 +7,8 @@ use tokio_util::{codec::FramedRead, io::StreamReader};
 
 use crate::{Error, Result};
 
+pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 1024 * 1024;
+
 /// A newline-delimited JSON response stream from Mihomo.
 pub struct HttpStream<T> {
     inner: Pin<Box<dyn Stream<Item = Result<T>> + Send>>,

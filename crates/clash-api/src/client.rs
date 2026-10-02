@@ -276,7 +276,10 @@ impl Client {
         let operation = metadata.operation();
         self.execute(&metadata, || async {
             let response = make_request()?
-                .upgrade_with_named_pipe_retry()
+                .upgrade_with_named_pipe_retry(
+                    matches!(operation, "logs_ws" | "structured_logs_ws")
+                        .then_some(crate::stream::MAX_LOG_MESSAGE_BYTES),
+                )
                 .await
                 .map_err(|source| Error::WebSocket { operation, source })?;
             response
