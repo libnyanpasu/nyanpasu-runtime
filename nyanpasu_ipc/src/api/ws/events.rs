@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::status::{CoreInfos, CoreState};
 
 /// The core log vocabulary, re-exported so a consumer of this stream never has
-/// to name the metadata crate to spell the payload it just decoded.
-pub use nyanpasu_core_metadata::{
-    ClashCoreKind, LogField, LogFrame, LogLevel, LogStream, LogTimestamp,
-};
+/// to name the logging crate to spell the payload it just decoded.
+pub use nyanpasu_core_metadata::ClashCoreKind;
+pub use nyanpasu_logging::{LogField, LogFrame, LogLevel, LogStream, LogTimestamp};
 
 /// The event endpoint. There is no protocol negotiation and no version
 /// parameter: the service binary ships with the program that consumes it, so

@@ -26,3 +26,9 @@ pub struct OwnedLogRequest<T> {
     pub owner: String,
     pub request: T,
 }
+
+pub const CORE_LOG_FILES_ENDPOINT: &str = "/v1/core/logs/files";
+pub const CORE_LOG_OPEN_ENDPOINT: &str = "/v1/core/logs/open";
+pub const CORE_LOG_QUERY_ENDPOINT: &str = "/v1/core/logs/query";
+pub const CORE_LOG_CLOSE_ENDPOINT: &str = "/v1/core/logs/close";
+pub const CORE_LOG_QUERY_VERSION: u32 = 1;

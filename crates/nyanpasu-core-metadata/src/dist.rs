@@ -71,7 +71,7 @@ impl std::fmt::Display for VariantTag {
 ///
 /// A runtime identity handshake, not a mirror of the manifest schema —
 /// registries, mirrors, checksums and version plans stay in the manifest layer.
-/// It is also deliberately not what a [`crate::LogFrame`] carries: console
+/// It is also deliberately not what a normalized console record carries: console
 /// output can only ever evidence the family.
 ///
 /// The canonical `tag_key` is not carried and not re-derived. That key is the
