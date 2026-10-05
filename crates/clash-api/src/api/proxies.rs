@@ -308,8 +308,43 @@ struct ProxyMap {
 }
 
 #[derive(serde::Deserialize)]
-struct ProxyList {
-    proxies: Vec<Proxy>,
+struct GroupList {
+    #[serde(deserialize_with = "deserialize_groups")]
+    proxies: IndexMap<ProxyName, Proxy>,
+}
+
+// Mihomo lists groups as an array and Meow as a name-indexed object; the two
+// JSON shapes are disjoint, so accepting both never misreads either core.
+fn deserialize_groups<'de, D>(
+    deserializer: D,
+) -> std::result::Result<IndexMap<ProxyName, Proxy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Groups;
+    impl<'de> serde::de::Visitor<'de> for Groups {
+        type Value = IndexMap<ProxyName, Proxy>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a proxy group array or name-indexed object")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut groups = IndexMap::new();
+            while let Some(group) = seq.next_element::<Proxy>()? {
+                groups.insert(group.name.clone(), group);
+            }
+            Ok(groups)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    deserializer.deserialize_any(Groups)
 }
 
 #[derive(serde::Deserialize)]
@@ -323,8 +358,8 @@ struct SelectProxyRequest<'a> {
 }
 
 impl Client {
-    pub async fn groups(&self) -> Result<Vec<Proxy>> {
-        let result: ProxyList = self
+    pub async fn groups(&self) -> Result<IndexMap<ProxyName, Proxy>> {
+        let result: GroupList = self
             .send_json(RequestMetadata::new("groups", Method::GET, true), || {
                 self.get("/group")
             })

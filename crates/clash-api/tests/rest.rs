@@ -382,6 +382,51 @@ fn group_record(name: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn group_lists_accept_mihomo_arrays_and_meow_maps() {
+    let group = group_record("组/ %");
+    let mut memberless = group_record("memberless");
+    memberless["all"] = serde_json::Value::Null;
+    let cases = [
+        (
+            serde_json::json!({"proxies": [group.clone(), memberless.clone()]}),
+            Some(2),
+        ),
+        (
+            serde_json::json!({"proxies": {"组/ %": group.clone(), "memberless": memberless}}),
+            Some(2),
+        ),
+        (serde_json::json!({"proxies": []}), Some(0)),
+        (serde_json::json!({"proxies": {}}), Some(0)),
+        (serde_json::json!({"proxies": null}), None),
+        (serde_json::json!({}), None),
+        (serde_json::json!({"proxies": [{"name": "broken"}]}), None),
+    ];
+    for (body, expected) in cases {
+        let app = Router::new().route("/group", get(move || async move { Json(body) }));
+        let (address, server) = spawn_server(app).await;
+        let result = Client::new_http(address).unwrap().groups().await;
+        match expected {
+            Some(count) => {
+                let groups = result.unwrap();
+                assert_eq!(groups.len(), count);
+                if let Some(group) = groups.get(&ProxyName::from("组/ %")) {
+                    assert_eq!(group.all, Some(vec![]));
+                    assert!(group.now.is_none());
+                }
+                if let Some(group) = groups.get(&ProxyName::from("memberless")) {
+                    assert!(group.all.is_none());
+                }
+            }
+            None => assert!(
+                matches!(result, Err(clash_api::Error::Decode { .. })),
+                "{result:?}"
+            ),
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn proxy_resource_paths_encode_names_without_trailing_slashes() {
     let app = Router::new()
         .route("/group/{name}", get(|Path(name): Path<String>| async move { Json(group_record(&name)) }))
