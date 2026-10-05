@@ -326,14 +326,14 @@ impl Client {
     pub async fn groups(&self) -> Result<Vec<Proxy>> {
         let result: ProxyList = self
             .send_json(RequestMetadata::new("groups", Method::GET, true), || {
-                self.get("/group/")
+                self.get("/group")
             })
             .await?;
         Ok(result.proxies)
     }
 
     pub async fn group(&self, name: &ProxyName) -> Result<Proxy> {
-        let url = self.endpoint_with_segments("/group", [name.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/group", [name.as_str()])?;
         self.send_json(RequestMetadata::new("group", Method::GET, true), || {
             Ok(self.request_url(Method::GET, url.clone()))
         })
@@ -357,14 +357,14 @@ impl Client {
     pub async fn proxies(&self) -> Result<IndexMap<ProxyName, Proxy>> {
         let result: ProxyMap = self
             .send_json(RequestMetadata::new("proxies", Method::GET, true), || {
-                self.get("/proxies/")
+                self.get("/proxies")
             })
             .await?;
         Ok(result.proxies)
     }
 
     pub async fn proxy(&self, name: &ProxyName) -> Result<Proxy> {
-        let url = self.endpoint_with_segments("/proxies", [name.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/proxies", [name.as_str()])?;
         self.send_json(RequestMetadata::new("proxy", Method::GET, true), || {
             Ok(self.request_url(Method::GET, url.clone()))
         })
@@ -384,7 +384,7 @@ impl Client {
 
     pub async fn select_proxy(&self, selection: ProxySelection<'_>) -> Result<()> {
         let ProxySelection { group, target } = selection;
-        let url = self.endpoint_with_segments("/proxies", [group.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/proxies", [group.as_str()])?;
         self.send_empty(
             RequestMetadata::new("select_proxy", Method::PUT, false),
             || {
@@ -397,7 +397,7 @@ impl Client {
     }
 
     pub async fn clear_proxy_selection(&self, group: &ProxyName) -> Result<()> {
-        let url = self.endpoint_with_segments("/proxies", [group.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/proxies", [group.as_str()])?;
         self.send_empty(
             RequestMetadata::new("clear_proxy_selection", Method::DELETE, false),
             || Ok(self.request_url(Method::DELETE, url.clone())),
@@ -409,14 +409,14 @@ impl Client {
         let result: ProviderMap = self
             .send_json(
                 RequestMetadata::new("proxy_providers", Method::GET, true),
-                || self.get("/providers/proxies/"),
+                || self.get("/providers/proxies"),
             )
             .await?;
         Ok(result.providers)
     }
 
     pub async fn proxy_provider(&self, provider: &ProviderName) -> Result<ProxyProvider> {
-        let url = self.endpoint_with_segments("/providers/proxies", [provider.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/providers/proxies", [provider.as_str()])?;
         self.send_json(
             RequestMetadata::new("proxy_provider", Method::GET, true),
             || Ok(self.request_url(Method::GET, url.clone())),
@@ -425,7 +425,7 @@ impl Client {
     }
 
     pub async fn update_proxy_provider(&self, provider: &ProviderName) -> Result<()> {
-        let url = self.endpoint_with_segments("/providers/proxies", [provider.as_str(), ""])?;
+        let url = self.endpoint_with_segments("/providers/proxies", [provider.as_str()])?;
         self.send_empty(
             RequestMetadata::new("update_proxy_provider", Method::PUT, false),
             || Ok(self.request_url(Method::PUT, url.clone())),
@@ -449,10 +449,8 @@ impl Client {
         provider: &ProviderName,
         proxy: &ProxyName,
     ) -> Result<Proxy> {
-        let url = self.endpoint_with_segments(
-            "/providers/proxies",
-            [provider.as_str(), proxy.as_str(), ""],
-        )?;
+        let url =
+            self.endpoint_with_segments("/providers/proxies", [provider.as_str(), proxy.as_str()])?;
         self.send_json(
             RequestMetadata::new("provider_proxy", Method::GET, true),
             || Ok(self.request_url(Method::GET, url.clone())),
