@@ -581,6 +581,7 @@ dependencies = [
  "specta-serde",
  "specta-typescript",
  "specta-util",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
