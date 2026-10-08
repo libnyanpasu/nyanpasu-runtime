@@ -4,6 +4,7 @@ mod events;
 mod logger;
 mod manager_bridge;
 mod routing;
+mod transparent_proxy;
 
 use std::sync::Arc;
 
@@ -46,6 +47,40 @@ pub async fn run(
     .await?;
     let hub = EventHub::new();
     core_manager.spawn_bridges(hub.clone());
+    let transparent_proxy = transparent_proxy::TransparentProxy::new(core_manager.clone());
+    if let Err(error) = transparent_proxy.recover().await {
+        tracing::error!("failed to recover transparent proxy state: {error}");
+    }
+    let mut core_status = core_manager.subscribe_runtime_status();
+    let proxy_lifecycle = transparent_proxy.clone();
+    let proxy_shutdown = transparent_proxy.clone();
+    let lifecycle_token = token.clone();
+    let lifecycle_shutdown = token.clone();
+    let lifecycle_task = tokio::spawn(async move {
+        let mut retry = tokio::time::interval(std::time::Duration::from_secs(5));
+        retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = lifecycle_token.cancelled() => break,
+                _ = retry.tick() => {
+                    if let Err(error) = proxy_lifecycle.cleanup_if_stale().await {
+                        tracing::error!("failed to retry transparent proxy cleanup: {error}");
+                    }
+                }
+                changed = core_status.changed() => {
+                    if changed.is_err() { break; }
+                    core_status.borrow_and_update();
+                    if let Err(error) = proxy_lifecycle.cleanup_if_stale().await {
+                        tracing::error!("failed to remove stale transparent proxy rules: {error}");
+                    }
+                }
+            }
+        }
+        proxy_lifecycle.begin_shutdown();
+        if let Err(error) = proxy_lifecycle.cleanup().await {
+            tracing::error!("failed to clean transparent proxy rules on shutdown: {error}");
+        }
+    });
 
     // The tracing writer was bound to the global logger before `run`; share that
     // instance so the `/logs` routes read the buffer that is actually being fed.
@@ -67,6 +102,7 @@ pub async fn run(
         runtime: Arc::new(runtime),
         logger,
         logs: logs.clone(),
+        transparent_proxy,
     };
     let app = create_router(state);
     tracing::info!("Starting server...");
@@ -80,13 +116,28 @@ pub async fn run(
         sids,
     );
     tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => {
+    enum ServerExit<E> {
+        Server(Result<(), E>),
+        Cancelled,
+        Control(ExecutorExit),
+    }
+    let exit = tokio::select! {
+        result = &mut server => ServerExit::Server(result),
+        _ = token.cancelled() => ServerExit::Cancelled,
+        exit = core_manager.until_control_closed() => ServerExit::Control(exit),
+    };
+    proxy_shutdown.begin_shutdown();
+    lifecycle_shutdown.cancel();
+    if let Err(error) = lifecycle_task.await {
+        tracing::error!("transparent proxy lifecycle task failed: {error}");
+    }
+    match exit {
+        ServerExit::Server(result) => {
             let _ = logs.shutdown().await;
             core_manager.shutdown().await;
             result?;
         }
-        _ = token.cancelled() => {
+        ServerExit::Cancelled => {
             let _ = logs.shutdown().await;
             core_manager.shutdown().await;
             drain(&mut server).await?;
@@ -94,7 +145,7 @@ pub async fn run(
         // The control plane owns every core transaction. If its executor is
         // gone the daemon cannot serve `/v2/core/*` truthfully, so it stops
         // rather than answering with a control plane that is not there.
-        exit = core_manager.until_control_closed() => {
+        ServerExit::Control(exit) => {
             let _ = logs.shutdown().await;
             if exit == ExecutorExit::Died {
                 tracing::error!("the core control executor died; shutting the service down");
