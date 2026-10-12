@@ -12,7 +12,10 @@ use super::AppState;
 
 use nyanpasu_ipc::api::{
     R,
-    contract::{LogClose, LogFiles, LogOpen, LogQuery},
+    contract::{
+        CoreLogClose, CoreLogFiles, CoreLogOpen, CoreLogQuery, LogClose, LogFiles, LogOpen,
+        LogQuery,
+    },
     log::OwnedLogRequest,
 };
 use nyanpasu_logging::{
@@ -25,6 +28,14 @@ pub fn sessions() -> Router<AppState> {
         .register(LogOpen, open_session)
         .register(LogQuery, query_session)
         .register(LogClose, close_session)
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
+}
+pub fn core_sessions() -> Router<AppState> {
+    Router::new()
+        .register(CoreLogFiles, core_list_files)
+        .register(CoreLogOpen, core_open_session)
+        .register(CoreLogQuery, core_query_session)
+        .register(CoreLogClose, core_close_session)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
 }
 async fn bounded<T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug>(
@@ -58,6 +69,30 @@ async fn close_session(
     Json(req): Json<OwnedLogRequest<String>>,
 ) -> Json<R<'static, LogResult<()>>> {
     bounded(state.logs.close(req.owner, req.request)).await
+}
+
+async fn core_list_files(
+    State(state): State<AppState>,
+) -> Json<R<'static, LogResult<Vec<LogFileInfo>>>> {
+    bounded(state.core_logs.catalog()).await
+}
+async fn core_open_session(
+    State(state): State<AppState>,
+    Json(req): Json<OwnedLogRequest<OpenLogs>>,
+) -> Json<R<'static, LogResult<LogSession>>> {
+    bounded(state.core_logs.open(req.owner, req.request)).await
+}
+async fn core_query_session(
+    State(state): State<AppState>,
+    Json(req): Json<OwnedLogRequest<QueryLogs>>,
+) -> Json<R<'static, LogResult<LogPage>>> {
+    bounded(state.core_logs.query(req.owner, req.request)).await
+}
+async fn core_close_session(
+    State(state): State<AppState>,
+    Json(req): Json<OwnedLogRequest<String>>,
+) -> Json<R<'static, LogResult<()>>> {
+    bounded(state.core_logs.close(req.owner, req.request)).await
 }
 
 pub fn setup() -> Router<AppState> {

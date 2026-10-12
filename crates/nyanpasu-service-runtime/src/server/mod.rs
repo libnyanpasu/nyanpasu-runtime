@@ -61,12 +61,23 @@ pub async fn run(
     )
     .await?;
 
+    let core_logs = nyanpasu_logging::LogsClient::start(
+        Arc::new(nyanpasu_logging::FsCoreLogFiles::new(
+            core_manager
+                .core_log_dir()
+                .ok_or_else(|| anyhow::anyhow!("core archive is disabled"))?,
+        )),
+        Arc::new(nyanpasu_logging::MonotonicClock::default()),
+    )
+    .await?;
+
     let state = AppState {
         core_manager: core_manager.clone(),
         hub,
         runtime: Arc::new(runtime),
         logger,
         logs: logs.clone(),
+        core_logs: core_logs.clone(),
     };
     let app = create_router(state);
     tracing::info!("Starting server...");
@@ -83,11 +94,13 @@ pub async fn run(
     tokio::select! {
         result = &mut server => {
             let _ = logs.shutdown().await;
+            let _ = core_logs.shutdown().await;
             core_manager.shutdown().await;
             result?;
         }
         _ = token.cancelled() => {
             let _ = logs.shutdown().await;
+            let _ = core_logs.shutdown().await;
             core_manager.shutdown().await;
             drain(&mut server).await?;
         }
@@ -96,6 +109,7 @@ pub async fn run(
         // rather than answering with a control plane that is not there.
         exit = core_manager.until_control_closed() => {
             let _ = logs.shutdown().await;
+            let _ = core_logs.shutdown().await;
             if exit == ExecutorExit::Died {
                 tracing::error!("the core control executor died; shutting the service down");
                 core_manager.shutdown().await;

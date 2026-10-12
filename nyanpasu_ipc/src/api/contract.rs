@@ -79,6 +79,35 @@ impl IpcOperation for LogClose {
     type Data = nyanpasu_logging::LogResult<()>;
 }
 
+pub struct CoreLogFiles;
+impl IpcOperation for CoreLogFiles {
+    const METHOD: Method = Method::GET;
+    const PATH: &'static str = super::log::CORE_LOG_FILES_ENDPOINT;
+    type Req<'a> = ();
+    type Data = nyanpasu_logging::LogResult<Vec<nyanpasu_logging::LogFileInfo>>;
+}
+pub struct CoreLogOpen;
+impl IpcOperation for CoreLogOpen {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::log::CORE_LOG_OPEN_ENDPOINT;
+    type Req<'a> = super::log::OwnedLogRequest<nyanpasu_logging::OpenLogs>;
+    type Data = nyanpasu_logging::LogResult<nyanpasu_logging::LogSession>;
+}
+pub struct CoreLogQuery;
+impl IpcOperation for CoreLogQuery {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::log::CORE_LOG_QUERY_ENDPOINT;
+    type Req<'a> = super::log::OwnedLogRequest<nyanpasu_logging::QueryLogs>;
+    type Data = nyanpasu_logging::LogResult<nyanpasu_logging::LogPage>;
+}
+pub struct CoreLogClose;
+impl IpcOperation for CoreLogClose {
+    const METHOD: Method = Method::POST;
+    const PATH: &'static str = super::log::CORE_LOG_CLOSE_ENDPOINT;
+    type Req<'a> = super::log::OwnedLogRequest<String>;
+    type Data = nyanpasu_logging::LogResult<()>;
+}
+
 /// `GET /status`
 pub struct Status;
 
@@ -249,6 +278,26 @@ mod tests {
         assert_eq!(
             (CoreV2Status::METHOD, CoreV2Status::PATH),
             (Method::GET, "/v2/core/status")
+        );
+    }
+
+    #[test]
+    fn core_log_operations_have_separate_typed_routes() {
+        assert_eq!(
+            (CoreLogFiles::METHOD, CoreLogFiles::PATH),
+            (Method::GET, "/v1/core/logs/files")
+        );
+        assert_eq!(
+            (CoreLogOpen::METHOD, CoreLogOpen::PATH),
+            (Method::POST, "/v1/core/logs/open")
+        );
+        assert_eq!(
+            (CoreLogQuery::METHOD, CoreLogQuery::PATH),
+            (Method::POST, "/v1/core/logs/query")
+        );
+        assert_eq!(
+            (CoreLogClose::METHOD, CoreLogClose::PATH),
+            (Method::POST, "/v1/core/logs/close")
         );
     }
 }

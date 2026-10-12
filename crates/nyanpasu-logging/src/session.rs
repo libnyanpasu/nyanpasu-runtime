@@ -567,11 +567,9 @@ fn refresh_page(
             .to_string();
         let target = index.target(entry).to_string();
         let value = serde_json::from_str::<serde_json::Value>(&raw).ok();
-        let message = value
-            .as_ref()
-            .and_then(|v| v["fields"]["message"].as_str())
-            .unwrap_or(&raw)
-            .to_string();
+        let message = crate::record::decode(value.as_ref(), &raw)
+            .message
+            .into_owned();
         if text.as_ref().is_some_and(|text| {
             !message.to_lowercase().contains(text) && !target.to_lowercase().contains(text)
         }) {
@@ -658,6 +656,116 @@ mod tests {
             cursor: None,
             limit: 200,
         }
+    }
+    #[test]
+    fn core_records_filter_page_preserve_raw_and_follow_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = "core-999999.jsonl";
+        let row = serde_json::json!({"t":"log", "at":123, "epoch":7, "kind":"mihomo",
+            "stream":"stderr", "level":"warning", "timestamp":{"raw":"old", "unix_ms":1, "inferred":true},
+            "target":"startup", "message":"failed 中文", "fields":[{"key":"path","value":"config.yaml"}], "raw":"original stderr", "truncated":true});
+        let gap = serde_json::json!({"t":"gap", "at":124, "dropped":9});
+        fs_write(
+            dir.path().join(first),
+            format!("{row}\n{gap}\n{{\"t\":\"log\""),
+        );
+        let files = FsCoreLogFiles::new(dir.path().into());
+        let mut current = Work::new();
+        let page = refresh_page(&files, "", &mut current, &query("s")).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.rows[0].timestamp.as_deref(), Some("123"));
+        assert_eq!(page.rows[0].level, Level::Warn);
+        assert_eq!(page.rows[0].message, "failed 中文");
+        assert!(page.rows[0].truncated);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&page.rows[0].raw).unwrap(),
+            row
+        );
+        assert_eq!(page.truncated, "1");
+        assert_eq!(page.rows[1].level, Level::Warn);
+        assert_eq!(
+            page.rows[1].message,
+            "Core console capture dropped 9 records"
+        );
+        assert_eq!(page.rows[1].timestamp.as_deref(), Some("124"));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join(first))
+            .unwrap();
+        file.write_all(b",\"at\":125,\"message\":\"completed\"}\n")
+            .unwrap();
+        drop(file);
+        let mut after = query("s");
+        after.direction = Direction::After;
+        after.cursor = Some(page.head.clone());
+        assert_eq!(
+            refresh_page(&files, "", &mut current, &after).unwrap().rows[0].message,
+            "completed"
+        );
+        let mut filtered = query("s");
+        filtered.filter = Filter {
+            levels: vec![Level::Warn],
+            target: Some("startup".into()),
+            text: Some("中文".into()),
+            from_ms: Some(123),
+            to_ms: Some(124),
+        };
+        assert_eq!(
+            refresh_page(&files, "", &mut current, &filtered)
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        let mut one = query("s");
+        one.limit = 1;
+        one.filter.levels = vec![Level::Warn];
+        let latest = refresh_page(&files, "", &mut current, &one).unwrap();
+        one.direction = Direction::Before;
+        one.cursor = Some(latest.cursor);
+        assert_eq!(
+            refresh_page(&files, "", &mut current, &one).unwrap().rows[0].message,
+            "failed 中文"
+        );
+        let mut pinned = Work::new();
+        refresh_page(&files, first, &mut pinned, &query("s")).unwrap();
+        fs_write(dir.path().join("core-1000000.jsonl"), format!("{gap}\n"));
+        let next = refresh_page(&files, "", &mut current, &query("s")).unwrap();
+        assert_eq!(next.file, "core-1000000.jsonl");
+        assert_ne!(next.head.generation, page.head.generation);
+        assert_eq!(
+            refresh_page(&files, first, &mut pinned, &query("s"))
+                .unwrap()
+                .rows
+                .len(),
+            3
+        );
+        std::fs::remove_file(dir.path().join(first)).unwrap();
+        assert_eq!(
+            refresh_page(&files, first, &mut pinned, &query("s")).unwrap_err(),
+            LogError::FileGone
+        );
+    }
+    fn fs_write(path: std::path::PathBuf, contents: String) {
+        std::fs::write(path, contents).unwrap();
+    }
+    #[test]
+    fn oversized_core_raw_inspection_marks_response_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = serde_json::json!({"t":"log", "at":123, "level":"info",
+            "message":"short", "raw":"x".repeat(MAX_LINE / 2), "truncated":false});
+        fs_write(dir.path().join("core-000001.jsonl"), format!("{row}\n"));
+        let page = refresh_page(
+            &FsCoreLogFiles::new(dir.path().into()),
+            "",
+            &mut Work::new(),
+            &query("s"),
+        )
+        .unwrap();
+        assert_eq!(page.rows[0].message, "short");
+        assert!(page.rows[0].truncated);
+        assert!(page.rows[0].raw.len() <= MAX_LINE / 4);
+        assert!(serde_json::to_vec(&page).unwrap().len() <= MAX_BATCH);
     }
     async fn ready(client: &LogsClient, id: &str) -> LogPage {
         tokio::time::timeout(Duration::from_secs(3), async {
