@@ -1,11 +1,7 @@
-use std::{fmt, time::Duration};
+use std::time::Duration;
 
 use chrono::{DateTime, FixedOffset};
 use reqwest::Method;
-use serde::{
-    Deserialize, Deserializer,
-    de::{self, MapAccess, Visitor},
-};
 use uuid::Uuid;
 
 use crate::{Client, Error, Result, retry::RequestMetadata};
@@ -64,8 +60,8 @@ pub struct Connection {
 /// here via `#[serde(from = "ConnectionWire")]` so serialization can use a
 /// different, named shape for `extra` (see [`Connection::extra`]).
 // Serialize registers the serde attributes that Specta needs for the wire schema;
-// the application serializes Connection instead. Decoding below bypasses flatten.
-#[derive(serde::Serialize, specta::Type)]
+// the application serializes Connection instead. DeserializeMap bypasses flatten buffering.
+#[derive(serde::Serialize, nyanpasu_serde::DeserializeMap, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionWire {
     id: Uuid,
@@ -79,100 +75,9 @@ struct ConnectionWire {
     rule: String,
     rule_payload: String,
     #[serde(flatten)]
+    #[nyanpasu_serde(extra)]
     #[specta(type = indexmap::IndexMap<String, Option<JsonValue>>)]
     extra: indexmap::IndexMap<String, serde_json::Value>,
-}
-
-impl<'de> Deserialize<'de> for ConnectionWire {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(field_identifier)]
-        enum Field {
-            #[serde(rename = "id")]
-            Id,
-            #[serde(rename = "metadata")]
-            Metadata,
-            #[serde(rename = "upload")]
-            Upload,
-            #[serde(rename = "download")]
-            Download,
-            #[serde(rename = "start")]
-            Start,
-            #[serde(rename = "chains")]
-            Chains,
-            #[serde(rename = "providerChains")]
-            ProviderChains,
-            #[serde(rename = "rule")]
-            Rule,
-            #[serde(rename = "rulePayload")]
-            RulePayload,
-            // Only unknown keys need owned storage for the extra map.
-            Other(String),
-        }
-
-        struct WireVisitor;
-
-        impl<'de> Visitor<'de> for WireVisitor {
-            type Value = ConnectionWire;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a connection object")
-            }
-
-            fn visit_map<M: MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> std::result::Result<Self::Value, M::Error> {
-                let mut id = None;
-                let mut metadata = None;
-                let mut upload = None;
-                let mut download = None;
-                let mut start = None;
-                let mut chains = None;
-                let mut provider_chains = None;
-                let mut rule = None;
-                let mut rule_payload = None;
-                let mut unknown_fields = indexmap::IndexMap::new();
-
-                while let Some(field) = map.next_key()? {
-                    match field {
-                        Field::Id => read_once(&mut id, &mut map, "id")?,
-                        Field::Metadata => read_once(&mut metadata, &mut map, "metadata")?,
-                        Field::Upload => read_once(&mut upload, &mut map, "upload")?,
-                        Field::Download => read_once(&mut download, &mut map, "download")?,
-                        Field::Start => read_once(&mut start, &mut map, "start")?,
-                        Field::Chains => read_once(&mut chains, &mut map, "chains")?,
-                        Field::ProviderChains => {
-                            read_once(&mut provider_chains, &mut map, "providerChains")?
-                        }
-                        Field::Rule => read_once(&mut rule, &mut map, "rule")?,
-                        Field::RulePayload => {
-                            read_once(&mut rule_payload, &mut map, "rulePayload")?
-                        }
-                        Field::Other(key) => {
-                            unknown_fields.insert(key, map.next_value()?);
-                        }
-                    }
-                }
-
-                Ok(ConnectionWire {
-                    id: id.ok_or_else(|| de::Error::missing_field("id"))?,
-                    metadata: metadata.unwrap_or_default(),
-                    upload: upload.ok_or_else(|| de::Error::missing_field("upload"))?,
-                    download: download.ok_or_else(|| de::Error::missing_field("download"))?,
-                    start: start.ok_or_else(|| de::Error::missing_field("start"))?,
-                    chains: chains.ok_or_else(|| de::Error::missing_field("chains"))?,
-                    provider_chains: provider_chains.unwrap_or_default(),
-                    rule: rule.ok_or_else(|| de::Error::missing_field("rule"))?,
-                    rule_payload: rule_payload
-                        .ok_or_else(|| de::Error::missing_field("rulePayload"))?,
-                    extra: unknown_fields,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(WireVisitor)
-    }
 }
 
 impl From<ConnectionWire> for Connection {
@@ -251,7 +156,16 @@ pub enum DnsMode {
 /// Known `ConnectionMetadata` fields. Flattened into both [`ConnectionMetadata`]
 /// (serialize) and [`ConnectionMetadataWire`] (deserialize) so they are only
 /// defined once; see [`ConnectionMetadata::extra`] for the unknown-field split.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, specta::Type)]
+#[derive(
+    nyanpasu_serde::DeserializeFields,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    specta::Type,
+)]
 pub struct ConnectionMetadataFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<crate::ConfigEnum<ConnectionNetwork>>,
@@ -341,223 +255,14 @@ pub struct ConnectionMetadata {
 
 /// Deserialize-only mirror of [`ConnectionMetadata`]; see [`ConnectionWire`].
 // Keep the flattened Specta wire schema while decoding directly into known fields.
-#[derive(serde::Serialize, specta::Type)]
+#[derive(serde::Serialize, nyanpasu_serde::DeserializeMap, specta::Type)]
 struct ConnectionMetadataWire {
     #[serde(flatten)]
     known: ConnectionMetadataFields,
     #[serde(flatten)]
+    #[nyanpasu_serde(extra)]
     #[specta(type = indexmap::IndexMap<String, Option<JsonValue>>)]
     extra: indexmap::IndexMap<String, serde_json::Value>,
-}
-
-impl<'de> Deserialize<'de> for ConnectionMetadataWire {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(field_identifier)]
-        enum Field {
-            #[serde(rename = "network")]
-            Network,
-            #[serde(rename = "type")]
-            ConnectionType,
-            #[serde(rename = "sourceIP")]
-            SourceIp,
-            #[serde(rename = "destinationIP")]
-            DestinationIp,
-            #[serde(rename = "sourceGeoIP")]
-            SourceGeoIp,
-            #[serde(rename = "destinationGeoIP")]
-            DestinationGeoIp,
-            #[serde(rename = "sourceIPASN")]
-            SourceIpAsn,
-            #[serde(rename = "destinationIPASN")]
-            DestinationIpAsn,
-            #[serde(rename = "sourcePort")]
-            SourcePort,
-            #[serde(rename = "destinationPort")]
-            DestinationPort,
-            #[serde(rename = "inboundIP")]
-            InboundIp,
-            #[serde(rename = "inboundPort")]
-            InboundPort,
-            #[serde(rename = "inboundName")]
-            InboundName,
-            #[serde(rename = "inboundUser")]
-            InboundUser,
-            #[serde(rename = "rematchName")]
-            RematchName,
-            #[serde(rename = "host")]
-            Host,
-            #[serde(rename = "dnsMode")]
-            DnsMode,
-            #[serde(rename = "uid")]
-            Uid,
-            #[serde(rename = "process")]
-            Process,
-            #[serde(rename = "processPath")]
-            ProcessPath,
-            #[serde(rename = "specialProxy")]
-            SpecialProxy,
-            #[serde(rename = "specialRules")]
-            SpecialRules,
-            #[serde(rename = "remoteDestination")]
-            RemoteDestination,
-            #[serde(rename = "dscp")]
-            Dscp,
-            #[serde(rename = "sniffHost")]
-            SniffHost,
-            // Only unknown keys need owned storage for the extra map.
-            Other(String),
-        }
-
-        struct WireVisitor;
-
-        impl<'de> Visitor<'de> for WireVisitor {
-            type Value = ConnectionMetadataWire;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a connection metadata object")
-            }
-
-            fn visit_map<M: MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> std::result::Result<Self::Value, M::Error> {
-                let mut network = None;
-                let mut connection_type = None;
-                let mut source_ip = None;
-                let mut destination_ip = None;
-                let mut source_geo_ip = None;
-                let mut destination_geo_ip = None;
-                let mut source_ip_asn = None;
-                let mut destination_ip_asn = None;
-                let mut source_port: Option<optional_port::Port> = None;
-                let mut destination_port: Option<optional_port::Port> = None;
-                let mut inbound_ip = None;
-                let mut inbound_port: Option<optional_port::Port> = None;
-                let mut inbound_name = None;
-                let mut inbound_user = None;
-                let mut rematch_name = None;
-                let mut host = None;
-                let mut dns_mode = None;
-                let mut uid = None;
-                let mut process = None;
-                let mut process_path = None;
-                let mut special_proxy = None;
-                let mut special_rules = None;
-                let mut remote_destination = None;
-                let mut dscp = None;
-                let mut sniff_host = None;
-                let mut unknown_fields = indexmap::IndexMap::new();
-
-                while let Some(field) = map.next_key()? {
-                    match field {
-                        Field::Network => read_once(&mut network, &mut map, "network")?,
-                        Field::ConnectionType => read_once(&mut connection_type, &mut map, "type")?,
-                        Field::SourceIp => read_once(&mut source_ip, &mut map, "sourceIP")?,
-                        Field::DestinationIp => {
-                            read_once(&mut destination_ip, &mut map, "destinationIP")?
-                        }
-                        Field::SourceGeoIp => {
-                            read_once(&mut source_geo_ip, &mut map, "sourceGeoIP")?
-                        }
-                        Field::DestinationGeoIp => {
-                            read_once(&mut destination_geo_ip, &mut map, "destinationGeoIP")?
-                        }
-                        Field::SourceIpAsn => {
-                            read_once(&mut source_ip_asn, &mut map, "sourceIPASN")?
-                        }
-                        Field::DestinationIpAsn => {
-                            read_once(&mut destination_ip_asn, &mut map, "destinationIPASN")?
-                        }
-                        Field::SourcePort => read_once(&mut source_port, &mut map, "sourcePort")?,
-                        Field::DestinationPort => {
-                            read_once(&mut destination_port, &mut map, "destinationPort")?
-                        }
-                        Field::InboundIp => read_once(&mut inbound_ip, &mut map, "inboundIP")?,
-                        Field::InboundPort => {
-                            read_once(&mut inbound_port, &mut map, "inboundPort")?
-                        }
-                        Field::InboundName => {
-                            read_once(&mut inbound_name, &mut map, "inboundName")?
-                        }
-                        Field::InboundUser => {
-                            read_once(&mut inbound_user, &mut map, "inboundUser")?
-                        }
-                        Field::RematchName => {
-                            read_once(&mut rematch_name, &mut map, "rematchName")?
-                        }
-                        Field::Host => read_once(&mut host, &mut map, "host")?,
-                        Field::DnsMode => read_once(&mut dns_mode, &mut map, "dnsMode")?,
-                        Field::Uid => read_once(&mut uid, &mut map, "uid")?,
-                        Field::Process => read_once(&mut process, &mut map, "process")?,
-                        Field::ProcessPath => {
-                            read_once(&mut process_path, &mut map, "processPath")?
-                        }
-                        Field::SpecialProxy => {
-                            read_once(&mut special_proxy, &mut map, "specialProxy")?
-                        }
-                        Field::SpecialRules => {
-                            read_once(&mut special_rules, &mut map, "specialRules")?
-                        }
-                        Field::RemoteDestination => {
-                            read_once(&mut remote_destination, &mut map, "remoteDestination")?
-                        }
-                        Field::Dscp => read_once(&mut dscp, &mut map, "dscp")?,
-                        Field::SniffHost => read_once(&mut sniff_host, &mut map, "sniffHost")?,
-                        Field::Other(key) => {
-                            unknown_fields.insert(key, map.next_value()?);
-                        }
-                    }
-                }
-
-                Ok(ConnectionMetadataWire {
-                    known: ConnectionMetadataFields {
-                        network: network.unwrap_or_default(),
-                        connection_type: connection_type.unwrap_or_default(),
-                        source_ip: source_ip.unwrap_or_default(),
-                        destination_ip: destination_ip.unwrap_or_default(),
-                        source_geo_ip: source_geo_ip.unwrap_or_default(),
-                        destination_geo_ip: destination_geo_ip.unwrap_or_default(),
-                        source_ip_asn: source_ip_asn.unwrap_or_default(),
-                        destination_ip_asn: destination_ip_asn.unwrap_or_default(),
-                        source_port: source_port.and_then(|port| port.0),
-                        destination_port: destination_port.and_then(|port| port.0),
-                        inbound_ip: inbound_ip.unwrap_or_default(),
-                        inbound_port: inbound_port.and_then(|port| port.0),
-                        inbound_name: inbound_name.unwrap_or_default(),
-                        inbound_user: inbound_user.unwrap_or_default(),
-                        rematch_name: rematch_name.unwrap_or_default(),
-                        host: host.unwrap_or_default(),
-                        dns_mode: dns_mode.unwrap_or_default(),
-                        uid: uid.unwrap_or_default(),
-                        process: process.unwrap_or_default(),
-                        process_path: process_path.unwrap_or_default(),
-                        special_proxy: special_proxy.unwrap_or_default(),
-                        special_rules: special_rules.unwrap_or_default(),
-                        remote_destination: remote_destination.unwrap_or_default(),
-                        dscp: dscp.unwrap_or_default(),
-                        sniff_host: sniff_host.unwrap_or_default(),
-                    },
-                    extra: unknown_fields,
-                })
-            }
-        }
-
-        deserializer.deserialize_map(WireVisitor)
-    }
-}
-
-// The outer Option records presence, including a field explicitly set to null.
-fn read_once<'de, M: MapAccess<'de>, T: Deserialize<'de>>(
-    field: &mut Option<T>,
-    map: &mut M,
-    name: &'static str,
-) -> std::result::Result<(), M::Error> {
-    if field.is_some() {
-        return Err(de::Error::duplicate_field(name));
-    }
-    *field = Some(map.next_value()?);
-    Ok(())
 }
 
 impl From<ConnectionMetadataWire> for ConnectionMetadata {
@@ -657,14 +362,9 @@ mod optional_port {
     use std::fmt;
 
     use serde::{
-        Deserialize, Deserializer, Serialize, Serializer,
+        Deserializer, Serialize, Serializer,
         de::{self, Visitor},
     };
-
-    // Allows MapAccess::next_value to use the same parser as the public fields type.
-    #[derive(Deserialize)]
-    #[serde(transparent)]
-    pub(super) struct Port(#[serde(deserialize_with = "deserialize")] pub Option<u16>);
 
     pub fn serialize<S: Serializer>(value: &Option<u16>, serializer: S) -> Result<S::Ok, S::Error> {
         value.map(|port| port.to_string()).serialize(serializer)

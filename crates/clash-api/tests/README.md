@@ -12,6 +12,18 @@ profile and dependency lockfile before and after a change. This probe measures
 allocation churn, not parsing speed or Windows process memory; application
 Private Commit and slow-consumer retention still need separate measurements.
 
+`cargo run --release -p clash-api --example connections_timing` measures parse/drop
+time with the system allocator, separately from DHAT. It uses the same two frames,
+20 warm-up frames, and the median of nine groups of 500 frames. Run with other
+builds and CPU-heavy work stopped. Compare the same toolchain, lockfile and Cargo
+profile: this workspace optimizes release builds for size with LTO, so standalone
+benchmark crates using Cargo's default release settings are a different workload.
+
+Connection wire models derive `nyanpasu_serde::DeserializeMap` and their flattened
+known field group derives `DeserializeFields`. The [derive library](../../nyanpasu-serde/README.md)
+documents supported attributes and limitations. These derives preserve direct
+typed field reads without maintaining a second field list in handwritten visitors.
+
 `mihomo.rs` starts the platform core from `tests/bin`, then tests HTTP plus
 the local transport available on that platform:
 
