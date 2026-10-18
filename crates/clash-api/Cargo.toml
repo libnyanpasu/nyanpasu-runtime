@@ -28,6 +28,7 @@ url = "2"
 uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+dhat = "0.3"
 tempfile = "3"
 axum = { workspace = true, features = ["ws"] }
 hyper = { version = "1", features = ["http1", "server"] }

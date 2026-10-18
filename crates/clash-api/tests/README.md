@@ -1,5 +1,17 @@
 # Clash API integration tests
 
+`connections_decode.rs` checks the complete connection wire/IPC contract,
+including unknown fields, duplicate keys, missing/null values and port bounds.
+Run it with `cargo test -p clash-api --test connections_decode`.
+
+`cargo run -p clash-api --example connections_allocations` measures global
+allocation requests and requested bytes for parsing and dropping 100 synthetic
+frames of 150 connections, with and without nested unknown fields. Fixture
+construction and parser warm-up are excluded. Compare the same fixture, build
+profile and dependency lockfile before and after a change. This probe measures
+allocation churn, not parsing speed or Windows process memory; application
+Private Commit and slow-consumer retention still need separate measurements.
+
 `mihomo.rs` starts the platform core from `tests/bin`, then tests HTTP plus
 the local transport available on that platform:
 
