@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/reqwest-websocket"]
 members = [
   "crates/nyanpasu-serde",
   "crates/nyanpasu-serde-derive",
@@ -54,3 +55,6 @@ opt-level = "s"
 lto = true
 panic = "unwind"
 codegen-units = 1
+
+[patch.crates-io]
+reqwest-websocket = { path = "vendor/reqwest-websocket" }

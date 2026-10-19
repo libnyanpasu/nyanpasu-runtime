@@ -69,10 +69,19 @@ pub struct WebSocketStream<T> {
 }
 impl<T: DeserializeOwned + Send + 'static> WebSocketStream<T> {
     pub(crate) fn new(socket: reqwest_websocket::WebSocket, operation: &'static str) -> Self {
+        #[cfg(target_arch = "wasm32")]
         use reqwest_websocket::Message;
+        #[cfg(not(target_arch = "wasm32"))]
+        use tungstenite::Message;
+        #[cfg(not(target_arch = "wasm32"))]
+        let (socket, _) = socket.into_native_parts();
         let stream = socket
             .take_while(|frame| {
-                futures_util::future::ready(!matches!(frame, Ok(Message::Close { .. })))
+                #[cfg(not(target_arch = "wasm32"))]
+                let closed = matches!(frame, Ok(Message::Close(..)));
+                #[cfg(target_arch = "wasm32")]
+                let closed = matches!(frame, Ok(Message::Close { .. }));
+                futures_util::future::ready(!closed)
             })
             .filter_map(move |frame| async move {
                 match frame {
@@ -85,7 +94,10 @@ impl<T: DeserializeOwned + Send + 'static> WebSocketStream<T> {
                             .map_err(|source| Error::Decode { operation, source }),
                     ),
                     Ok(_) => None,
-                    Err(source) => Some(Err(Error::WebSocketRead { operation, source })),
+                    Err(source) => Some(Err(Error::WebSocketRead {
+                        operation,
+                        source: source.into(),
+                    })),
                 }
             });
         Self {
