@@ -118,8 +118,8 @@ A strongly-typed async client for the Mihomo/Clash External Controller (REST + W
 
 ### nyanpasu-serde (`crates/nyanpasu-serde`)
 
-Direct map decoding derived from struct fields and Serde attributes, with
-flattened known groups and ordered unknown-field preservation. The companion
+Direct map and scalar enum decoding derived from Serde attributes, with
+flattened known groups, ordered unknown fields, and untagged scalar dispatch. The companion
 `nyanpasu-serde-derive` crate generates the decoders. See the
 [library guide](crates/nyanpasu-serde/README.md) for supported shapes and limitations.
 

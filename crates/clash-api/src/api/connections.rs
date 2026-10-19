@@ -359,12 +359,7 @@ impl Client {
 }
 
 mod optional_port {
-    use std::fmt;
-
-    use serde::{
-        Deserializer, Serialize, Serializer,
-        de::{self, Visitor},
-    };
+    use serde::{Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(value: &Option<u16>, serializer: S) -> Result<S::Ok, S::Error> {
         value.map(|port| port.to_string()).serialize(serializer)
@@ -373,39 +368,19 @@ mod optional_port {
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<u16>, D::Error> {
-        struct PortVisitor;
-
-        impl<'de> Visitor<'de> for PortVisitor {
-            type Value = Option<u16>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("null, a u16, or a decimal port string")
-            }
-
-            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(None)
-            }
-            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-                Ok(None)
-            }
-            fn visit_some<D: Deserializer<'de>>(
-                self,
-                deserializer: D,
-            ) -> Result<Self::Value, D::Error> {
-                deserializer.deserialize_any(self)
-            }
-            fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                u16::try_from(value).map(Some).map_err(E::custom)
-            }
-            fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                u16::try_from(value).map(Some).map_err(E::custom)
-            }
-            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                value.parse().map(Some).map_err(E::custom)
-            }
+        #[derive(nyanpasu_serde::DeserializeUntagged)]
+        #[serde(untagged)]
+        enum Port {
+            Null,
+            Number(u16),
+            #[nyanpasu_serde(kind = "string")]
+            Text(#[serde(deserialize_with = "nyanpasu_serde::from_str")] u16),
         }
-
-        deserializer.deserialize_option(PortVisitor)
+        use serde::Deserialize;
+        Ok(match Port::deserialize(deserializer)? {
+            Port::Null => None,
+            Port::Number(value) | Port::Text(value) => Some(value),
+        })
     }
 }
 

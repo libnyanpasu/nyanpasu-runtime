@@ -4,6 +4,11 @@
 including unknown fields, duplicate keys, missing/null values and port bounds.
 Run it with `cargo test -p clash-api --test connections_decode`.
 
+`scalar_decode.rs` compares the scalar derives with Serde reference models for
+open string enums and numeric/string samples, including externally tagged unit
+objects, escaped strings, reader/owned input, integer bounds and invalid inputs.
+Run it with `cargo test -p clash-api --test scalar_decode`.
+
 `cargo run -p clash-api --example connections_allocations` measures global
 allocation requests and requested bytes for parsing and dropping 100 synthetic
 frames of 150 connections, with and without nested unknown fields. Fixture

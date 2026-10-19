@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 
+extern crate self as nyanpasu_serde;
+
 use std::{fmt, marker::PhantomData};
 
 use serde::{
@@ -7,11 +9,15 @@ use serde::{
     de::{self, DeserializeSeed, MapAccess, Visitor},
 };
 
-pub use nyanpasu_serde_derive::{DeserializeFields, DeserializeMap};
+pub use nyanpasu_serde_derive::{DeserializeFields, DeserializeMap, DeserializeUntagged};
+
+mod scalar;
+pub use scalar::{from_str, number_or_string};
 
 /// Implementation details shared by generated code. Not a handwritten adapter API.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::scalar::{StringEnum, deserialize_string_enum};
     pub use serde;
 
     use super::*;

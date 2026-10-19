@@ -109,23 +109,3 @@ impl<T> std::fmt::Debug for WebSocketStream<T> {
             .finish_non_exhaustive()
     }
 }
-
-// Some compatible controllers encode numeric samples as decimal strings.
-pub(crate) fn deserialize_number<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de> + std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    use serde::{Deserialize, de::Error};
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Number<T> {
-        Number(T),
-        Text(String),
-    }
-    match Number::<T>::deserialize(deserializer)? {
-        Number::Number(value) => Ok(value),
-        Number::Text(value) => value.parse().map_err(D::Error::custom),
-    }
-}

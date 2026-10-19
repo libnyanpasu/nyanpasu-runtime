@@ -4,6 +4,18 @@ use quote::{format_ident, quote};
 use serde_derive_internals::{Ctxt, Derive, ast, attr};
 use syn::{DeriveInput, Meta, Token, parse_macro_input, punctuated::Punctuated};
 
+mod untagged;
+
+/// Derive direct decoding for scalar untagged enums and open string enums.
+#[proc_macro_derive(DeserializeUntagged, attributes(serde, nyanpasu_serde))]
+pub fn deserialize_untagged(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    runtime_path(&input)
+        .and_then(|runtime| untagged::generate(&input, runtime))
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// Derive map decoding with an optional flattened field group and an explicit extra sink.
 #[proc_macro_derive(DeserializeMap, attributes(serde, nyanpasu_serde))]
 pub fn deserialize_map(input: TokenStream) -> TokenStream {
@@ -85,6 +97,10 @@ fn reject_recursion(ty: &syn::Type, name: &syn::Ident) -> syn::Result<()> {
 }
 
 fn expand(input: &DeriveInput, deserialize: bool) -> syn::Result<Tokens> {
+    generate(input, deserialize, runtime_path(input)?)
+}
+
+fn runtime_path(input: &DeriveInput) -> syn::Result<Tokens> {
     let runtime = match proc_macro_crate::crate_name("nyanpasu-serde")
         .map_err(|error| syn::Error::new_spanned(input, error))?
     {
@@ -94,7 +110,7 @@ fn expand(input: &DeriveInput, deserialize: bool) -> syn::Result<Tokens> {
             quote!(::#name)
         }
     };
-    generate(input, deserialize, runtime)
+    Ok(runtime)
 }
 
 fn generate(input: &DeriveInput, deserialize: bool, runtime: Tokens) -> syn::Result<Tokens> {
@@ -500,5 +516,123 @@ mod tests {
         let mut methods = Methods(0);
         methods.visit_file(&file);
         assert_eq!(methods.0, 7);
+        for input in [
+            syn::parse_quote!(
+                #[serde(untagged)]
+                enum Scalar {
+                    Number(u16),
+                    #[nyanpasu_serde(kind = "string")]
+                    Text(#[serde(deserialize_with = "parse")] u16),
+                    Null,
+                }
+            ),
+            syn::parse_quote!(
+                enum Open {
+                    Known,
+                    #[serde(untagged)]
+                    Other(String),
+                }
+            ),
+        ] {
+            let expanded = untagged::generate(&input, quote!(::nyanpasu_serde)).unwrap();
+            let file: syn::File = syn::parse2(expanded).unwrap();
+            let mut methods = Methods(0);
+            methods.visit_file(&file);
+            assert!(methods.0 >= 3);
+        }
+    }
+
+    #[test]
+    fn untagged_derive_rejects_ambiguous_shapes_and_unsupported_attributes() {
+        for input in [
+            quote!(
+                struct Model {
+                    value: u8,
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    A { x: u8 },
+                    B { y: u8 },
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    Pair(u8, u8),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model<T> {
+                    Unknown(T),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    Unknown(custom::String),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    #[nyanpasu_serde(kind = "map")]
+                    A(u8),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    #[nyanpasu_serde(kind = "string")]
+                    A(u8),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    A(#[serde(deserialize_with = "parse")] u8),
+                }
+            ),
+            quote!(
+                #[serde(untagged)]
+                enum Model {
+                    A(#[nyanpasu_serde(kind = "number")] u8),
+                }
+            ),
+            quote!(
+                #[serde(tag = "type")]
+                enum Model {
+                    A,
+                }
+            ),
+            quote!(
+                enum Model {
+                    A,
+                    #[serde(untagged)]
+                    Unknown(Vec<u8>),
+                }
+            ),
+            quote!(
+                enum Model {
+                    #[serde(alias = "B")]
+                    A,
+                    B,
+                    #[serde(untagged)]
+                    Unknown(String),
+                }
+            ),
+            quote!(
+                enum Model {
+                    A,
+                    #[serde(untagged)]
+                    Unknown(#[serde(deserialize_with = "parse")] String),
+                }
+            ),
+        ] {
+            let input = syn::parse2(input).unwrap();
+            assert!(untagged::generate(&input, quote!(::nyanpasu_serde)).is_err());
+        }
     }
 }

@@ -7,53 +7,14 @@ use reqwest::Method;
 use crate::{Client, LogLevel, Result, retry::RequestMetadata};
 
 /// Open response value; mutation and subscription enums remain closed.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, specta::Type)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, nyanpasu_serde::DeserializeUntagged, serde::Serialize, specta::Type,
+)]
 #[serde(untagged)]
 pub enum ConfigEnum<T> {
+    #[nyanpasu_serde(kind = "string")]
     Known(T),
     Unknown(String),
-}
-
-impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for ConfigEnum<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        struct EnumVisitor<T>(std::marker::PhantomData<T>);
-
-        impl<'de, T: serde::de::DeserializeOwned> serde::de::Visitor<'de> for EnumVisitor<T> {
-            type Value = ConfigEnum<T>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a configuration enum string")
-            }
-
-            fn visit_str<E: serde::de::Error>(
-                self,
-                value: &str,
-            ) -> std::result::Result<Self::Value, E> {
-                let known =
-                    serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value);
-                Ok(match T::deserialize(known) {
-                    Ok(value) => ConfigEnum::Known(value),
-                    Err(_) => ConfigEnum::Unknown(value.to_owned()),
-                })
-            }
-
-            fn visit_string<E: serde::de::Error>(
-                self,
-                value: String,
-            ) -> std::result::Result<Self::Value, E> {
-                let known =
-                    serde::de::value::StrDeserializer::<serde::de::value::Error>::new(&value);
-                Ok(match T::deserialize(known) {
-                    Ok(value) => ConfigEnum::Known(value),
-                    Err(_) => ConfigEnum::Unknown(value),
-                })
-            }
-        }
-
-        deserializer.deserialize_string(EnumVisitor(std::marker::PhantomData))
-    }
 }
 
 impl<T: AsRef<str>> ConfigEnum<T> {
