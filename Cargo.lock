@@ -561,7 +561,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clash-api"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "backon",
@@ -2248,7 +2248,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-core-manager"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "camino",
  "chrono",
@@ -2278,7 +2278,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-core-metadata"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "constcat",
  "enumset",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-ipc"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-jobs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "futures-util",
  "jiff",
@@ -2344,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-logging"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "chrono",
  "file-id",
@@ -2362,7 +2362,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-serde"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "indexmap",
  "nyanpasu-serde-derive",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-serde-derive"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-service"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "nyanpasu-service-runtime",
  "nyanpasu-utils",
@@ -2395,7 +2395,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-service-runtime"
-version = "2.0.0"
+version = "2.0.1"
 dependencies = [
  "ansi-str",
  "anyhow",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "nyanpasu-windows-security"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "tokio",
