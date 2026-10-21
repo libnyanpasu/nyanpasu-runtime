@@ -9,7 +9,7 @@ default-run = "nyanpasu-service"
 
 [dependencies]
 nyanpasu-service-runtime = { path = "../crates/nyanpasu-service-runtime" }
-nyanpasu-utils = { path = "../crates/nyanpasu-utils", default-features = false }
+nyanpasu-utils = { path = "../crates/nyanpasu-utils", default-features = false, features = ["process"] }
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 
