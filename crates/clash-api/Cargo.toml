@@ -29,7 +29,7 @@ url = "2"
 uuid = { version = "1", features = ["serde"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tungstenite = { version = "0.28", default-features = false }
+tungstenite = { version = "0.30", default-features = false }
 
 [dev-dependencies]
 dhat = "0.3"
