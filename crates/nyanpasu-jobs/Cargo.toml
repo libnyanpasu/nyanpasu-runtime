@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 specta = { version = "2.0.0-rc.25", features = ["derive"], optional = true }
 
 [dev-dependencies]
-specta-serde = "0.0.12"
+specta-serde = "0.0.14"
 specta-typescript = "0.0.12"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
