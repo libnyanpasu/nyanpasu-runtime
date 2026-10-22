@@ -16,6 +16,7 @@ name = "nyanpasu-manager-host"
 path = "tests/helpers/manager_host.rs"
 
 [dependencies]
+nyanpasu-logging = { path = "../nyanpasu-logging", features = ["specta"] }
 nyanpasu-core-metadata = { path = "../nyanpasu-core-metadata" }
 nyanpasu-utils = { path = "../nyanpasu-utils", default-features = false, features = ["process"] }
 
