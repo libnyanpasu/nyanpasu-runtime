@@ -28,7 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3.30"
 futures-util = "0.3"
-parking_lot = "0.12"
+parking_lot = "0.13"
 serde = { version = "1", features = ["derive"] }
 simd-json = "0.18"
 thiserror = "2"
