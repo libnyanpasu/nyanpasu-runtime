@@ -79,7 +79,7 @@ The whole runtime implementation behind the `nyanpasu-service` binary (its lib n
 - `cmds/` — clap CLI definitions and subcommand implementations.
 - `server/` — the axum RPC server (`run()`): HTTP routing (core lifecycle, status, logs, network, ws events), `CoreManagerService` bridging to `nyanpasu-core-manager`, an `EventHub` broadcaster and an in-memory log buffer.
 - `utils/` — service install/start/stop across platforms (macOS goes through `launchctl`), elevation checks, service data/runtime directories, Windows ACL helpers.
-- Features: `deadlock_detection`, `tracing` (console-subscriber), `debug` (both), `hardware-lock-elision`.
+- Features: `deadlock_detection`, `tracing` (console-subscriber), `debug` (both).
 
 ## Crates
 

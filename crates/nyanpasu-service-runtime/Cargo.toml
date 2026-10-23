@@ -59,7 +59,7 @@ ctrlc = { version = "3", features = ["termination"] }
 dunce = "1.0.5"
 futures-util = { workspace = true }
 oneshot = "0.2"
-parking_lot = "0.12"
+parking_lot = "0.13"
 semver = "1"
 serde_yaml_ng = "0.10"
 serde = { workspace = true, features = ["derive"] }
@@ -112,5 +112,4 @@ deadlock_detection = [
   "parking_lot/deadlock_detection",
 ]
 debug = ["deadlock_detection", "tracing"]
-hardware-lock-elision = ["parking_lot/hardware-lock-elision"]
 tracing = ["dep:console-subscriber", "tokio/tracing"]

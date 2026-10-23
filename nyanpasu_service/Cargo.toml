@@ -20,5 +20,4 @@ windows-service = "0.8"
 [features]
 deadlock_detection = ["nyanpasu-service-runtime/deadlock_detection"]
 debug = ["nyanpasu-service-runtime/debug"]
-hardware-lock-elision = ["nyanpasu-service-runtime/hardware-lock-elision"]
 tracing = ["nyanpasu-service-runtime/tracing"]
