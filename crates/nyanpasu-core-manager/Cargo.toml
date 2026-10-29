@@ -39,6 +39,7 @@ zerocopy = { version = "0.8", features = ["derive", "simd"] }
 
 [dev-dependencies]
 nyanpasu-core-manager = { path = ".", features = ["test-hooks"] }
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 default = []
