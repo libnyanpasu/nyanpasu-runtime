@@ -470,10 +470,7 @@ async fn create(dir: &Utf8Path, seq: u64) -> Result<tokio::fs::File, Error> {
     let mut options = tokio::fs::OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
+    options.mode(0o600);
     retry_io(&path, || async {
         #[cfg(test)]
         tests::io_attempt(tests::Operation::Open)?;
