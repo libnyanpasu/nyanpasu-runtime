@@ -211,6 +211,9 @@ pub(super) async fn cleanup_controller(
     options: &crate::ManagerOptions,
     epoch: Epoch,
 ) -> Result<(), Error> {
+    // Only Unix controllers are socket files that outlive their epoch.
+    #[cfg(not(unix))]
+    let _ = epoch;
     if options.controller_dir.is_some() {
         #[cfg(unix)]
         {

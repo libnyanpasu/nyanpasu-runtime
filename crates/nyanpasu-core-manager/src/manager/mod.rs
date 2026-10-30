@@ -801,6 +801,10 @@ impl CoreManager {
     /// its forwarder, prove the process dead. Publishes nothing and latches no
     /// quarantine — an unproven stop comes back as [`RetireFailure`] for the
     /// caller to place in its own sequence.
+    #[expect(
+        clippy::result_large_err,
+        reason = "a failed stop is destructured by its caller at once; boxing buys nothing"
+    )]
     async fn retire_current(&self, ctrl: &mut Ctrl) -> Result<Option<EpochPlan>, RetireFailure> {
         let Some(Active {
             instance,
