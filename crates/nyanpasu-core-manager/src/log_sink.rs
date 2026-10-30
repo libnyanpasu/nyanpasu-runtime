@@ -24,7 +24,9 @@
 
 use std::sync::Arc;
 
+use backon::Retryable as _;
 use camino::{Utf8Path, Utf8PathBuf};
+use nyanpasu_utils::io::{IoFailure, classify, transient_backoff};
 use serde::Serialize;
 use tokio::{
     io::AsyncWriteExt,
@@ -61,38 +63,20 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    let mut delays = [50, 100, 200].into_iter();
-    loop {
-        match operation().await.map_err(Into::into) {
-            Err(Error::Io(source)) => {
-                if transient_io(&source)
-                    && let Some(delay) = delays.next()
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                    continue;
-                }
-                return Err(Error::LogSinkIo {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-            result => return result,
-        }
+    let result = (|| {
+        let attempt = operation();
+        async move { attempt.await.map_err(Into::into) }
+    })
+    .retry(transient_backoff())
+    .when(|error| matches!(error, Error::Io(source) if classify(source) == IoFailure::Transient))
+    .await;
+    match result {
+        Err(Error::Io(source)) => Err(Error::LogSinkIo {
+            path: path.to_owned(),
+            source,
+        }),
+        result => result,
     }
-}
-
-fn transient_io(error: &std::io::Error) -> bool {
-    #[cfg(windows)]
-    if matches!(error.raw_os_error(), Some(32 | 33)) {
-        return true;
-    }
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::Interrupted
-            | std::io::ErrorKind::WouldBlock
-            | std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::ResourceBusy
-    )
 }
 
 /// Rotation knobs, mirrored from `ManagerOptions` so the writer does not carry
