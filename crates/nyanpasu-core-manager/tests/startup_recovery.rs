@@ -298,7 +298,7 @@ async fn unreadable_startup_pid_record_is_fatal_and_preserved() {
     let original = {
         use std::os::unix::fs::PermissionsExt;
         let original = std::fs::metadata(&pid).unwrap().permissions();
-        std::fs::set_permissions(&pid, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&pid, std::fs::Permissions::from_mode(0o000)).unwrap();
         original
     };
     let result = CoreManager::new(ManagerOptions {
