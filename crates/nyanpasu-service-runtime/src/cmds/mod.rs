@@ -17,7 +17,17 @@ mod update;
 #[cfg(all(test, not(target_os = "macos")))]
 mod test_support;
 
-pub use server::SHUTDOWN_TOKEN as SERVER_SHUTDOWN_TOKEN;
+pub struct Command(Cli);
+
+impl Command {
+    pub fn parse() -> Self {
+        Self(Cli::parse())
+    }
+
+    pub fn is_server(&self) -> bool {
+        matches!(self.0.command, Some(Commands::Server(_)))
+    }
+}
 
 /// The CLI spelling of [`nyanpasu_core_manager::LocalIpcPolicy`].
 ///
@@ -149,8 +159,14 @@ fn is_unprivileged(command: &Option<Commands>) -> bool {
     }
 }
 
-pub async fn process() -> Result<(), CommandError> {
-    let cli = Cli::parse();
+pub async fn process(
+    command: Command,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<(), CommandError> {
+    if command.is_server() && shutdown.is_cancelled() {
+        return Ok(());
+    }
+    let cli = command.0;
     if cli.version {
         print_version();
     }
@@ -173,7 +189,7 @@ pub async fn process() -> Result<(), CommandError> {
         Some(Commands::Stop) => Ok(tokio::task::spawn_blocking(stop::stop).await??),
         Some(Commands::Restart) => Ok(tokio::task::spawn_blocking(restart::restart).await??),
         Some(Commands::Server(ctx)) => {
-            server::server(ctx).await?;
+            server::server(ctx, shutdown).await?;
             Ok(())
         }
         Some(Commands::Status(ctx)) => Ok(status::status(ctx).await?),

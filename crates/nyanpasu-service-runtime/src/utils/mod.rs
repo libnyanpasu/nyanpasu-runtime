@@ -9,6 +9,8 @@ pub mod dirs;
 pub mod native_store_owner;
 pub mod os;
 pub mod service;
+#[cfg(windows)]
+pub mod windows_service;
 
 pub fn must_check_elevation() -> bool {
     #[cfg(windows)]

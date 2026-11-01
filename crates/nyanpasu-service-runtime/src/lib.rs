@@ -6,13 +6,14 @@ mod logging;
 mod server;
 pub mod utils;
 
+pub use cmds::Command;
 use consts::ExitCode;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
-pub async fn handler() -> ExitCode {
+pub async fn handler(command: Command, shutdown: CancellationToken) -> ExitCode {
     crate::utils::deadlock_detection();
-    let result = cmds::process().await;
+    let result = cmds::process(command, shutdown).await;
     match result {
         Ok(_) => ExitCode::Normal,
         Err(cmds::CommandError::PermissionDenied) => {
@@ -40,12 +41,6 @@ pub async fn handler() -> ExitCode {
             ExitCode::Other
         }
     }
-}
-
-/// The running server's cancellation token, published by the `server` command.
-/// The Windows service control handler cancels it when the SCM asks to stop.
-pub fn server_shutdown_token() -> Option<CancellationToken> {
-    cmds::SERVER_SHUTDOWN_TOKEN.get().cloned()
 }
 
 #[cfg(test)]

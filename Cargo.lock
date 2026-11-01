@@ -2405,6 +2405,7 @@ dependencies = [
  "tracing-subscriber",
  "whoami",
  "windows 0.62.2",
+ "windows-service",
 ]
 
 [[package]]

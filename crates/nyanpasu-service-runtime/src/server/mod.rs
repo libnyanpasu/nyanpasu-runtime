@@ -30,6 +30,9 @@ pub async fn run(
     #[cfg(windows)] sids: &[&str],
     #[cfg(not(windows))] sids: (),
 ) -> Result<(), anyhow::Error> {
+    if token.is_cancelled() {
+        return Ok(());
+    }
     let runtime_dir =
         camino::Utf8PathBuf::from_path_buf(crate::utils::dirs::service_core_runtime_dir())
             .map_err(|path| anyhow::anyhow!("core runtime dir is not UTF-8: {}", path.display()))?;
@@ -44,6 +47,10 @@ pub async fn run(
         native_store,
     )
     .await?;
+    if token.is_cancelled() {
+        core_manager.shutdown().await;
+        return Ok(());
+    }
     let hub = EventHub::new();
     core_manager.spawn_bridges(hub.clone());
 
@@ -61,6 +68,12 @@ pub async fn run(
     )
     .await?;
 
+    if token.is_cancelled() {
+        let _ = logs.shutdown().await;
+        core_manager.shutdown().await;
+        return Ok(());
+    }
+
     let state = AppState {
         core_manager: core_manager.clone(),
         hub,
@@ -71,25 +84,32 @@ pub async fn run(
     let app = create_router(state);
     tracing::info!("Starting server...");
     let shutdown_token = token.clone();
-    let server = create_server(
-        SERVICE_PLACEHOLDER,
-        app,
-        Some(async move {
-            shutdown_token.cancelled().await;
-        }),
-        sids,
-    );
+    let server = async {
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        create_server(
+            SERVICE_PLACEHOLDER,
+            app,
+            Some(async move {
+                shutdown_token.cancelled().await;
+            }),
+            sids,
+        )
+        .await
+    };
     tokio::pin!(server);
     tokio::select! {
-        result = &mut server => {
-            let _ = logs.shutdown().await;
-            core_manager.shutdown().await;
-            result?;
-        }
+        biased;
         _ = token.cancelled() => {
             let _ = logs.shutdown().await;
             core_manager.shutdown().await;
             drain(&mut server).await?;
+        }
+        result = &mut server => {
+            let _ = logs.shutdown().await;
+            core_manager.shutdown().await;
+            result?;
         }
         // The control plane owns every core transaction. If its executor is
         // gone the daemon cannot serve `/v2/core/*` truthfully, so it stops
@@ -221,6 +241,29 @@ mod tests {
             nyanpasu_data_dir: root.join("data"),
             nyanpasu_app_dir: root.join("app"),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_server_skips_manager_and_listener_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        std::fs::create_dir(&runtime.nyanpasu_config_dir).unwrap();
+        std::fs::write(
+            runtime.nyanpasu_config_dir.join("application.yaml"),
+            "invalid: [",
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+        #[cfg(windows)]
+        let sids = &[];
+        #[cfg(not(windows))]
+        let sids = ();
+        assert!(
+            run(runtime, LocalIpcPolicy::Disable, token, sids)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

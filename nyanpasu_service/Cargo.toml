@@ -11,11 +11,14 @@ default-run = "nyanpasu-service"
 nyanpasu-service-runtime = { path = "../crates/nyanpasu-service-runtime" }
 nyanpasu-utils = { path = "../crates/nyanpasu-utils", default-features = false, features = ["process"] }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 tracing.workspace = true
 
 [target."cfg(windows)".dependencies]
-tokio-util = { workspace = true }
 windows-service = "0.8"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 deadlock_detection = ["nyanpasu-service-runtime/deadlock_detection"]

@@ -103,6 +103,7 @@ whoami = "2"
 [target."cfg(windows)".dependencies]
 nyanpasu-windows-security = { path = "../nyanpasu-windows-security" }
 check_elevation = "0.2.4"
+windows-service = "0.8"
 windows = { workspace = true }
 
 [features]

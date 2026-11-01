@@ -112,15 +112,25 @@ pub fn install_with(manager: &dyn ServiceManager, ctx: InstallCommand) -> Result
         envs.push(("HOME".to_string(), home));
     }
     tracing::info!("Installing service...");
-    manager.install(build_install_ctx(
-        label.clone(),
-        InstallPaths {
-            program: service_binary,
-            working_directory: service_data_dir,
+    install_service(
+        manager,
+        build_install_ctx(
+            label.clone(),
+            InstallPaths {
+                program: service_binary,
+                working_directory: service_data_dir,
+            },
+            &ctx,
+            envs,
+        ),
+        || {
+            #[cfg(windows)]
+            crate::utils::windows_service::configure_preshutdown().map_err(|error| {
+                anyhow::anyhow!("failed to configure service preshutdown timeout: {error}")
+            })?;
+            Ok(())
         },
-        &ctx,
-        envs,
-    ))?;
+    )?;
     // Confirm the service is installed
     if matches!(
         crate::utils::service::status(manager, &label)?,
@@ -132,6 +142,16 @@ pub fn install_with(manager: &dyn ServiceManager, ctx: InstallCommand) -> Result
         )));
     }
     tracing::info!("Service installed");
+    Ok(())
+}
+
+fn install_service(
+    manager: &dyn ServiceManager,
+    ctx: ServiceInstallCtx,
+    configure: impl FnOnce() -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    manager.install(ctx)?;
+    configure()?;
     Ok(())
 }
 
@@ -191,6 +211,70 @@ fn build_install_ctx(
 mod tests {
     use super::*;
     use crate::cmds::test_support::{MockServiceManager, label, status_call};
+
+    #[test]
+    fn install_configures_preshutdown_after_registration() {
+        let manager = MockServiceManager::with_statuses([]);
+        let command = InstallCommand {
+            user: "user".into(),
+            nyanpasu_data_dir: "data".into(),
+            nyanpasu_config_dir: "config".into(),
+            nyanpasu_app_dir: "app".into(),
+            local_ipc_policy: LocalIpcPolicyArg::Disable,
+        };
+        let ctx = build_install_ctx(
+            label(),
+            InstallPaths {
+                program: "program".into(),
+                working_directory: "work".into(),
+            },
+            &command,
+            vec![],
+        );
+        let mut configured = false;
+        install_service(&manager, ctx, || {
+            assert!(matches!(
+                manager.calls().as_slice(),
+                [crate::cmds::test_support::Call::Install(_)]
+            ));
+            configured = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            configured,
+            "installation must configure the preshutdown budget"
+        );
+    }
+
+    #[test]
+    fn install_configuration_failure_preserves_registration_and_returns_error() {
+        let manager = MockServiceManager::with_statuses([]);
+        let command = InstallCommand {
+            user: "user".into(),
+            nyanpasu_data_dir: "data".into(),
+            nyanpasu_config_dir: "config".into(),
+            nyanpasu_app_dir: "app".into(),
+            local_ipc_policy: LocalIpcPolicyArg::Disable,
+        };
+        let ctx = build_install_ctx(
+            label(),
+            InstallPaths {
+                program: "program".into(),
+                working_directory: "work".into(),
+            },
+            &command,
+            vec![],
+        );
+        let result = install_service(&manager, ctx, || {
+            Err(CommandError::Other(anyhow::anyhow!("configuration denied")))
+        });
+        assert!(result.is_err());
+        assert!(matches!(
+            manager.calls().as_slice(),
+            [crate::cmds::test_support::Call::Install(_)]
+        ));
+    }
 
     #[test]
     fn install_rejects_a_running_service() {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::OnceLock};
+use std::{collections::BTreeSet, path::PathBuf};
 
 #[cfg(windows)]
 use anyhow::Context;
@@ -38,18 +38,22 @@ pub struct ServerContext {
     pub local_ipc_policy: super::LocalIpcPolicyArg,
 }
 
-pub static SHUTDOWN_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
-
 pub async fn server_inner(
     ctx: ServerContext,
     token: CancellationToken,
 ) -> Result<(), CommandError> {
+    if token.is_cancelled() {
+        return Ok(());
+    }
     nyanpasu_utils::os::kill_by_pid_file(
         crate::utils::dirs::service_pid_file(),
         // TODO: use common name
         Some(&["mihomo", "clash"]),
     )
     .await?;
+    if token.is_cancelled() {
+        return Ok(());
+    }
     tracing::info!("nyanpasu config dir: {:?}", ctx.nyanpasu_config_dir);
     tracing::info!("nyanpasu data dir: {:?}", ctx.nyanpasu_data_dir);
     tracing::info!("local ipc policy: {:?}", ctx.local_ipc_policy);
@@ -80,6 +84,10 @@ pub async fn server_inner(
         std::fs::create_dir_all(&service_config_dir)?;
     }
 
+    if token.is_cancelled() {
+        return Ok(());
+    }
+
     // Write current process id to file
     if let Err(e) = nyanpasu_utils::os::create_pid_file(
         crate::utils::dirs::service_pid_file(),
@@ -89,6 +97,10 @@ pub async fn server_inner(
     {
         tracing::error!("create pid file error: {}", e);
     };
+
+    if token.is_cancelled() {
+        return Ok(());
+    }
 
     let runtime_infos = RuntimeInfos {
         service_data_dir,
@@ -110,14 +122,38 @@ pub async fn server_inner(
     #[cfg(windows)]
     tracing::info!(sids = ?sids_str, "Loaded acl file");
 
+    if token.is_cancelled() {
+        return Ok(());
+    }
+
     crate::server::run(runtime_infos, ctx.local_ipc_policy.into(), token, sids_str).await?;
     Ok(())
 }
 
 #[instrument]
-pub async fn server(ctx: ServerContext) -> Result<(), CommandError> {
-    let token = CancellationToken::new();
-    SHUTDOWN_TOKEN.set(token.clone()).unwrap();
+pub async fn server(ctx: ServerContext, token: CancellationToken) -> Result<(), CommandError> {
     server_inner(ctx, token).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_before_server_poll_cancels_the_same_token() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let ctx = ServerContext {
+            nyanpasu_config_dir: PathBuf::from("/missing-r0-config"),
+            nyanpasu_data_dir: PathBuf::from("/missing-r0-data"),
+            nyanpasu_app_dir: PathBuf::from("/missing-r0-app"),
+            service: true,
+            local_ipc_policy: super::super::LocalIpcPolicyArg::Disable,
+        };
+        assert!(
+            server_inner(ctx, token).await.is_ok(),
+            "cancelled startup must skip preparation and listener/core startup"
+        );
+    }
 }
