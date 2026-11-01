@@ -828,3 +828,23 @@ fn the_core_check_request_is_pinned() {
         r#"{"core_type":{"clash":"mihomo"},"config_file":"/etc/nyanpasu/config.yaml"}"#
     );
 }
+
+#[test]
+fn service_status_wire_names_are_pinned() {
+    use nyanpasu_ipc::types::ServiceStatus;
+
+    for (status, expected) in [
+        (ServiceStatus::NotInstalled, "not_installed"),
+        (ServiceStatus::Stopped, "stopped"),
+        (ServiceStatus::Running, "running"),
+        (ServiceStatus::StartPending, "start_pending"),
+        (ServiceStatus::StopPending, "stop_pending"),
+        (ServiceStatus::Unknown, "unknown"),
+    ] {
+        assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_value::<ServiceStatus>(serde_json::json!(expected)).unwrap(),
+            status
+        );
+    }
+}
