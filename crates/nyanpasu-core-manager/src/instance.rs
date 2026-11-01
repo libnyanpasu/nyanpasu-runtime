@@ -9,8 +9,9 @@ use std::{
 };
 
 use nyanpasu_utils::process::{
-    Command, EpochPidFile, EpochPidFileSpec, OrphanReapOutcome, ProcessError, ProcessEvent,
-    ReadinessProbe, Supervisor, SupervisorEvent, TerminatedPayload, reap_epoch_pid_file,
+    Command, EpochPidFile, EpochPidFileSpec, OrphanReapOutcome, ProcessActivity, ProcessError,
+    ProcessEvent, ReadinessProbe, Supervisor, SupervisorEvent, TerminatedPayload,
+    reap_epoch_pid_file,
 };
 use tokio::{
     sync::{broadcast, mpsc, oneshot, watch},
@@ -157,6 +158,7 @@ struct ProbeNowRequest {
 }
 
 pub struct InstanceBuilder {
+    process_activity: Option<ProcessActivity>,
     spec: InstanceSpec,
     epoch: Epoch,
     controller: ResolvedController,
@@ -179,6 +181,7 @@ impl Instance {
         parent: CancellationToken,
     ) -> InstanceBuilder {
         InstanceBuilder {
+            process_activity: None,
             spec,
             epoch,
             controller,
@@ -205,6 +208,7 @@ impl Instance {
 
     async fn spawn_configured(builder: InstanceBuilder) -> Result<Instance, Error> {
         let InstanceBuilder {
+            process_activity,
             spec,
             epoch,
             controller,
@@ -314,6 +318,11 @@ impl Instance {
                 }
             }
         });
+        let supervisor = if let Some(activity) = process_activity {
+            supervisor.activity(activity)
+        } else {
+            supervisor
+        };
         let supervisor = if let Some(store) = shared.native_store.clone() {
             let shared = shared.clone();
             supervisor.before_spawn(move || {
@@ -546,6 +555,11 @@ impl Instance {
 }
 
 impl InstanceBuilder {
+    pub fn process_activity(mut self, activity: ProcessActivity) -> Self {
+        self.process_activity = Some(activity);
+        self
+    }
+
     pub fn windows_shutdown_helper(mut self, helper: Option<std::path::PathBuf>) -> Self {
         self.windows_shutdown_helper = helper;
         self

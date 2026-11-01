@@ -183,6 +183,7 @@ impl CoreManagerService {
             None,
             Arc::new(super::controller_access::UnavailableControllerAccess),
             native_store,
+            None,
         )
         .await
     }
@@ -193,13 +194,14 @@ impl CoreManagerService {
         controller_dir: Option<Utf8PathBuf>,
         access: Arc<dyn nyanpasu_core_manager::ControllerAccess>,
         native_store: Arc<dyn NativeStore>,
+        process_activity: Option<nyanpasu_utils::process::ProcessActivity>,
     ) -> Result<Self, anyhow::Error> {
         let digest = nyanpasu_core_manager::payload_digest(runtime_dir.as_str().as_bytes());
         // Leave room for the directory and epoch within sockaddr_un on macOS.
         let namespace = &digest[..16];
         let source_dir = runtime_dir.join("v2-sources");
         let data_dir = native_store.data_dir().to_owned();
-        let manager = Manager::builder(ManagerOptions {
+        let mut builder = Manager::builder(ManagerOptions {
             controller_dir,
             #[cfg(unix)]
             controller_template: Some(format!("core-{namespace}-{{epoch}}.sock")),
@@ -211,9 +213,11 @@ impl CoreManagerService {
             ..ManagerOptions::default()
         })
         .controller_access(access)
-        .native_store(native_store)
-        .build()
-        .await?;
+        .native_store(native_store);
+        if let Some(activity) = process_activity {
+            builder = builder.process_activity(activity);
+        }
+        let manager = builder.build().await?;
         let core_control =
             CoreControl::spawn(manager.clone(), ControlOptions::new(source_dir, data_dir));
         Ok(Self {

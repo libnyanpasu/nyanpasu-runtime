@@ -46,7 +46,7 @@ fn main() -> ExitCode {
     let shutdown = CancellationToken::new();
     block_on(run_until_signal(
         &mut rx,
-        handler(command, shutdown.clone()),
+        handler(command, shutdown.clone(), None),
         is_server,
         shutdown,
     ))
@@ -178,6 +178,7 @@ mod tests {
 #[cfg(any(windows, test))]
 mod service_host {
     use super::ExitCode;
+    use nyanpasu_utils::process::{ProcessActivity, ProcessActivitySource, ProcessActivityState};
     use std::{
         future::{Future, poll_fn},
         pin::Pin,
@@ -195,6 +196,7 @@ mod service_host {
     #[derive(Clone)]
     pub struct Shutdown {
         pub token: CancellationToken,
+        activity: ProcessActivitySource,
         started: Arc<Mutex<Option<Instant>>>,
     }
 
@@ -202,6 +204,7 @@ mod service_host {
         pub fn new() -> Self {
             Self {
                 token: CancellationToken::new(),
+                activity: ProcessActivitySource::new(),
                 started: Arc::new(Mutex::new(None)),
             }
         }
@@ -210,6 +213,15 @@ mod service_host {
             let mut started = self.started.lock().unwrap();
             started.get_or_insert_with(Instant::now);
             self.token.cancel();
+        }
+
+        pub fn preshutdown(&self) {
+            self.activity.set(ProcessActivityState::Quiescing);
+            self.request();
+        }
+
+        pub fn process_activity(&self) -> ProcessActivity {
+            self.activity.subscribe()
         }
     }
 
@@ -297,6 +309,50 @@ mod service_host {
         use super::*;
         use std::cell::RefCell;
         use tokio::sync::oneshot;
+
+        #[test]
+        fn preshutdown_quiesces_before_cancellation_and_stop_keeps_activity() {
+            use std::task::{Context, Wake, Waker};
+
+            struct ObserveCancellation(ProcessActivity);
+
+            impl Wake for ObserveCancellation {
+                fn wake(self: Arc<Self>) {
+                    assert_eq!(self.0.state(), ProcessActivityState::Quiescing);
+                }
+            }
+
+            let shutdown = Shutdown::new();
+            let activity = shutdown.process_activity();
+            shutdown.request();
+            assert!(shutdown.token.is_cancelled());
+            assert_eq!(activity.state(), ProcessActivityState::Active);
+
+            let shutdown = Shutdown::new();
+            let activity = shutdown.process_activity();
+            let waker = Waker::from(Arc::new(ObserveCancellation(activity.clone())));
+            let mut cx = Context::from_waker(&waker);
+            let cancellation = shutdown.token.cancelled();
+            tokio::pin!(cancellation);
+            assert!(cancellation.as_mut().poll(&mut cx).is_pending());
+            shutdown.preshutdown();
+            assert!(shutdown.token.is_cancelled());
+            assert_eq!(activity.state(), ProcessActivityState::Quiescing);
+            shutdown.request();
+            assert_eq!(activity.state(), ProcessActivityState::Quiescing);
+            assert_eq!(
+                shutdown.process_activity().state(),
+                ProcessActivityState::Quiescing
+            );
+
+            let shutdown = Shutdown::new();
+            shutdown.request();
+            shutdown.preshutdown();
+            assert_eq!(
+                shutdown.process_activity().state(),
+                ProcessActivityState::Quiescing
+            );
+        }
 
         #[tokio::test]
         async fn finished_thread_keeps_its_exit_code() {

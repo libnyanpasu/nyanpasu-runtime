@@ -83,9 +83,14 @@ fn run_service(_arguments: Vec<OsString>) -> windows_service::Result<u32> {
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            ServiceControl::Stop | ServiceControl::Preshutdown => {
+            ServiceControl::Stop => {
                 callback_shutdown.request();
                 tracing::info!("Received service stop control");
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Preshutdown => {
+                callback_shutdown.preshutdown();
+                tracing::info!("Received service preshutdown control");
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -116,9 +121,10 @@ fn run_service(_arguments: Vec<OsString>) -> windows_service::Result<u32> {
         nyanpasu_service::utils::windows_service::configure_preshutdown,
         || {
             let token = shutdown.token.clone();
+            let activity = shutdown.process_activity();
             let (done, finished) = tokio::sync::oneshot::channel();
             let handle = std::thread::spawn(move || {
-                let exit = block_on(nyanpasu_service::handler(command, token));
+                let exit = block_on(nyanpasu_service::handler(command, token, Some(activity)));
                 let _ = done.send(());
                 exit
             });

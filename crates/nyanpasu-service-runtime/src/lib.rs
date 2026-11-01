@@ -8,12 +8,17 @@ pub mod utils;
 
 pub use cmds::Command;
 use consts::ExitCode;
+use nyanpasu_utils::process::ProcessActivity;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
-pub async fn handler(command: Command, shutdown: CancellationToken) -> ExitCode {
+pub async fn handler(
+    command: Command,
+    shutdown: CancellationToken,
+    process_activity: Option<ProcessActivity>,
+) -> ExitCode {
     crate::utils::deadlock_detection();
-    let result = cmds::process(command, shutdown).await;
+    let result = cmds::process(command, shutdown, process_activity).await;
     match result {
         Ok(_) => ExitCode::Normal,
         Err(cmds::CommandError::PermissionDenied) => {

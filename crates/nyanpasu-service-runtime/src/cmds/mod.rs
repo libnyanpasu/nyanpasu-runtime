@@ -162,6 +162,7 @@ fn is_unprivileged(command: &Option<Commands>) -> bool {
 pub async fn process(
     command: Command,
     shutdown: tokio_util::sync::CancellationToken,
+    process_activity: Option<nyanpasu_utils::process::ProcessActivity>,
 ) -> Result<(), CommandError> {
     if command.is_server() && shutdown.is_cancelled() {
         return Ok(());
@@ -189,7 +190,7 @@ pub async fn process(
         Some(Commands::Stop) => Ok(tokio::task::spawn_blocking(stop::stop).await??),
         Some(Commands::Restart) => Ok(tokio::task::spawn_blocking(restart::restart).await??),
         Some(Commands::Server(ctx)) => {
-            server::server(ctx, shutdown).await?;
+            server::server(ctx, shutdown, process_activity).await?;
             Ok(())
         }
         Some(Commands::Status(ctx)) => Ok(status::status(ctx).await?),

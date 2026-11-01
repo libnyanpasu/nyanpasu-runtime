@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use nyanpasu_utils::process::ProcessActivity;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +33,7 @@ pub(crate) struct ProcessRuntimeBackend {
     cancel_token: CancellationToken,
     native_store: Option<std::sync::Arc<dyn crate::native_store::NativeStore>>,
     windows_shutdown_helper: Option<std::path::PathBuf>,
+    process_activity: Option<ProcessActivity>,
 }
 
 impl ProcessRuntimeBackend {
@@ -40,12 +42,14 @@ impl ProcessRuntimeBackend {
         cancel_token: CancellationToken,
         native_store: Option<std::sync::Arc<dyn crate::native_store::NativeStore>>,
         windows_shutdown_helper: Option<std::path::PathBuf>,
+        process_activity: Option<ProcessActivity>,
     ) -> Self {
         Self {
             probes,
             cancel_token,
             native_store,
             windows_shutdown_helper,
+            process_activity,
         }
     }
 }
@@ -99,6 +103,9 @@ impl RuntimeBackend for ProcessRuntimeBackend {
                     .map(|store| store.data_dir().to_owned()),
             );
             builder = builder.windows_shutdown_helper(self.windows_shutdown_helper.clone());
+            if let Some(activity) = &self.process_activity {
+                builder = builder.process_activity(activity.clone());
+            }
             if let Some(access) = &self.probes.controller_access {
                 let readiness = match self.probes.readiness.clone() {
                     Some(probe) => probe,

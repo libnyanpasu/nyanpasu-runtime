@@ -16,6 +16,7 @@ use nyanpasu_core_manager::{
     native_store::{FsNativeStore, StoreOwner, legacy_kind},
 };
 use nyanpasu_ipc::{SERVICE_PLACEHOLDER, server::create_server};
+use nyanpasu_utils::process::ProcessActivity;
 use routing::{AppState, create_router};
 use tokio_util::sync::CancellationToken;
 use tracing_attributes::instrument;
@@ -27,6 +28,7 @@ pub async fn run(
     runtime: RuntimeInfos,
     local_ipc_policy: LocalIpcPolicy,
     token: CancellationToken,
+    process_activity: Option<ProcessActivity>,
     #[cfg(windows)] sids: &[&str],
     #[cfg(not(windows))] sids: (),
 ) -> Result<(), anyhow::Error> {
@@ -45,6 +47,7 @@ pub async fn run(
         controller_dir,
         access,
         native_store,
+        process_activity,
     )
     .await?;
     if token.is_cancelled() {
@@ -260,7 +263,7 @@ mod tests {
         #[cfg(not(windows))]
         let sids = ();
         assert!(
-            run(runtime, LocalIpcPolicy::Disable, token, sids)
+            run(runtime, LocalIpcPolicy::Disable, token, None, sids)
                 .await
                 .is_ok()
         );

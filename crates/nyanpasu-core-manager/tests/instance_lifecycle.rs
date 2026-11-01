@@ -767,3 +767,96 @@ async fn exited_run_cancels_its_in_flight_probe_before_replacement() {
         nyanpasu_core_manager::Error::StartupTimeout { .. }
     ));
 }
+
+#[tokio::test]
+async fn manager_activity_reaches_replacement_and_shutdown() {
+    use nyanpasu_core_manager::{
+        ConfigInput, ControlOptions, CoreCommand, CoreCommandEnvelope, CoreControl, CoreManager,
+        CoreState, ManagerOptions, OperationId, ReconcileRequest,
+    };
+    use nyanpasu_utils::process::{
+        Backoff, BackoffRange, ProcessActivitySource, ProcessActivityState,
+    };
+
+    let (_guard, dir) = common::utf8_tempdir();
+    let source = ProcessActivitySource::new();
+    let (started, mut launches) = tokio::sync::mpsc::unbounded_channel();
+    let manager = CoreManager::builder(ManagerOptions {
+        runtime_dir: Some(dir.join("runtime")),
+        ..ManagerOptions::default()
+    })
+    .process_activity(source.subscribe())
+    .readiness_probe(ProbeHandle::from_fn("ready", move |context| {
+        started.send(context.pid).unwrap();
+        async { ProbeResult::Healthy }
+    }))
+    .build()
+    .await
+    .unwrap();
+    let control = CoreControl::spawn(
+        manager.clone(),
+        ControlOptions::new(dir.join("sources"), dir.clone()),
+    );
+    let mut spec = common::mihomo_spec(&dir, dir.join("unused.yaml"));
+    spec.options.backoff = Backoff::exponential(BackoffRange {
+        initial: Duration::ZERO,
+        max: Duration::ZERO,
+    });
+    control
+        .submit(CoreCommandEnvelope {
+            operation_id: OperationId::generate(),
+            command: CoreCommand::Reconcile(Box::new(ReconcileRequest {
+                core: spec.core,
+                config: ConfigInput::inline(b"external-controller: 127.0.0.1:0\n".to_vec()),
+                options: spec.options,
+                expected_applied: None,
+            })),
+        })
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+
+    for replacement in 0..2 {
+        let pid = tokio::time::timeout(Duration::from_secs(5), launches.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        source.set(ProcessActivityState::Quiescing);
+        let mut states = control.subscribe();
+        nyanpasu_utils::os::kill_pid(pid, None::<&[&str]>)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    states.borrow_and_update().state,
+                    CoreState::Restarting { .. }
+                ) {
+                    break;
+                }
+                states.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("crash must reach the restart boundary");
+        let restarted = tokio::time::timeout(Duration::from_millis(200), launches.recv()).await;
+        assert!(
+            restarted.is_err(),
+            "quiescing instance {replacement} restarted"
+        );
+        if replacement == 0 {
+            source.set(ProcessActivityState::Active);
+            tokio::time::timeout(Duration::from_secs(5), launches.recv())
+                .await
+                .expect("revocation must resume recovery")
+                .unwrap();
+            manager.restart().await.unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), control.shutdown())
+        .await
+        .expect("shutdown must drain a paused supervisor")
+        .unwrap();
+    assert!(matches!(control.status().state, CoreState::Stopped { .. }));
+}

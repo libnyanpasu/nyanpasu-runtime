@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[cfg(windows)]
 use anyhow::Context;
 use clap::Args;
+use nyanpasu_utils::process::ProcessActivity;
 use tokio_util::sync::CancellationToken;
 use tracing_attributes::instrument;
 
@@ -41,6 +42,7 @@ pub struct ServerContext {
 pub async fn server_inner(
     ctx: ServerContext,
     token: CancellationToken,
+    process_activity: Option<ProcessActivity>,
 ) -> Result<(), CommandError> {
     if token.is_cancelled() {
         return Ok(());
@@ -126,13 +128,24 @@ pub async fn server_inner(
         return Ok(());
     }
 
-    crate::server::run(runtime_infos, ctx.local_ipc_policy.into(), token, sids_str).await?;
+    crate::server::run(
+        runtime_infos,
+        ctx.local_ipc_policy.into(),
+        token,
+        process_activity,
+        sids_str,
+    )
+    .await?;
     Ok(())
 }
 
 #[instrument]
-pub async fn server(ctx: ServerContext, token: CancellationToken) -> Result<(), CommandError> {
-    server_inner(ctx, token).await?;
+pub async fn server(
+    ctx: ServerContext,
+    token: CancellationToken,
+    process_activity: Option<ProcessActivity>,
+) -> Result<(), CommandError> {
+    server_inner(ctx, token, process_activity).await?;
     Ok(())
 }
 
@@ -152,7 +165,7 @@ mod tests {
             local_ipc_policy: super::super::LocalIpcPolicyArg::Disable,
         };
         assert!(
-            server_inner(ctx, token).await.is_ok(),
+            server_inner(ctx, token, None).await.is_ok(),
             "cancelled startup must skip preparation and listener/core startup"
         );
     }

@@ -11,6 +11,7 @@ mod switching;
 use std::sync::Arc;
 
 use enumset::EnumSet;
+use nyanpasu_utils::process::ProcessActivity;
 use serde_yaml_ng::Mapping;
 use tokio::sync::{broadcast, watch};
 
@@ -107,6 +108,7 @@ pub struct CoreManagerBuilder {
     dns: Option<Arc<dyn DnsController>>,
     controller_access: Option<Arc<dyn crate::ControllerAccess>>,
     native_store: Option<Arc<dyn crate::native_store::NativeStore>>,
+    process_activity: Option<ProcessActivity>,
 }
 
 struct Inner {
@@ -238,6 +240,11 @@ struct PreparedApply {
 }
 
 impl CoreManagerBuilder {
+    pub fn process_activity(mut self, activity: ProcessActivity) -> Self {
+        self.process_activity = Some(activity);
+        self
+    }
+
     pub fn readiness_probe(mut self, probe: ProbeHandle) -> Self {
         self.probes.readiness = Some(probe);
         self
@@ -294,6 +301,7 @@ impl CoreManager {
             dns: None,
             controller_access: None,
             native_store: None,
+            process_activity: None,
         }
     }
 
@@ -309,6 +317,7 @@ impl CoreManager {
             dns,
             controller_access,
             native_store,
+            process_activity,
         } = builder;
         let runtime_dir = options
             .runtime_dir
@@ -410,6 +419,7 @@ impl CoreManager {
                 options.cancel_token.clone(),
                 native_store.clone(),
                 options.windows_shutdown_helper.clone(),
+                process_activity,
             ))
         });
         let manager = Self {
