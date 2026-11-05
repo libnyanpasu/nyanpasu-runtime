@@ -6,14 +6,14 @@
 //! that used to project this shape has been retired.
 
 use serde::{Deserialize, Serialize};
-use specta::Type;
 
-use crate::ClashCoreKind;
+use nyanpasu_core_metadata::ClashCoreKind;
 
 /// Normalized severity. Go's `fatal` and `panic` both terminate the process, so
 /// they collapse into `Fatal`; the original spelling survives in
 /// [`LogFrame::raw`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Trace,
@@ -25,14 +25,16 @@ pub enum LogLevel {
 }
 
 /// Which console stream a record arrived on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "lowercase")]
 pub enum LogStream {
     Stdout,
     Stderr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct LogTimestamp {
     /// Exactly as the core printed it.
     pub raw: String,
@@ -44,7 +46,8 @@ pub struct LogTimestamp {
 }
 
 /// One structured field the core printed beside its message.
-#[derive(Debug, Clone, PartialEq, Eq, Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct LogField {
     pub key: String,
     pub value: String,
@@ -58,7 +61,8 @@ pub struct LogField {
 ///
 /// The field order is the on-disk JSONL order: the archive flattens this struct
 /// straight into its envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Type, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct LogFrame {
     /// Unix milliseconds at which the parser observed the record's **root**
     /// line. Always present, which is what makes a stream of frames sortable: a
@@ -83,4 +87,35 @@ pub struct LogFrame {
     /// Content was dropped at the parser boundary, either because continuations
     /// stopped fitting or because a single value exceeded its cap.
     pub truncated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_console_model_keeps_its_wire_shape() {
+        let json = r#"{"at":123,"epoch":7,"kind":"mihomo","stream":"stderr","level":"warning","timestamp":{"raw":"08:00:00","unix_ms":null,"inferred":true},"target":null,"message":"failure","fields":[{"key":"path","value":"config.yaml"}],"raw":"raw console","truncated":true}"#;
+        let frame: LogFrame = serde_json::from_str(json).unwrap();
+        assert_eq!(frame.level, LogLevel::Warning);
+        assert_eq!(frame.stream, LogStream::Stderr);
+        assert_eq!(serde_json::to_string(&frame).unwrap(), json);
+        assert_eq!(
+            serde_json::to_string(&crate::Level::Warn).unwrap(),
+            "\"warn\""
+        );
+        for (level, wire) in [
+            (LogLevel::Trace, "trace"),
+            (LogLevel::Debug, "debug"),
+            (LogLevel::Info, "info"),
+            (LogLevel::Warning, "warning"),
+            (LogLevel::Error, "error"),
+            (LogLevel::Fatal, "fatal"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&level).unwrap(),
+                format!("\"{wire}\"")
+            );
+        }
+    }
 }

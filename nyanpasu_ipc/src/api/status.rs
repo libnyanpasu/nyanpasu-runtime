@@ -191,6 +191,9 @@ pub struct StatusResBody<'a> {
     /// Optional viewer protocol; absence does not affect core control compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_query_version: Option<u32>,
+    /// Core console archive protocol, independent of service log support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_log_query_version: Option<u32>,
 }
 
 pub type StatusRes<'a> = R<'a, StatusResBody<'a>>;

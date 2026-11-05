@@ -22,6 +22,7 @@ pub struct AppState {
     pub runtime: Arc<RuntimeInfos>,
     pub logger: Logger<'static>,
     pub logs: nyanpasu_logging::LogsClient,
+    pub core_logs: nyanpasu_logging::LogsClient,
 }
 
 #[instrument(skip(state))]
@@ -43,6 +44,7 @@ pub fn create_router(state: AppState) -> Router {
         .layer(tracing_layer)
         // Successful viewer polls must not generate more service log records.
         .merge(logs::sessions())
+        .merge(logs::core_sessions())
         .fallback(middleware::not_found)
         .method_not_allowed_fallback(middleware::method_not_allowed)
         .with_state(state)

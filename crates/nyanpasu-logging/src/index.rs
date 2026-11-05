@@ -26,7 +26,7 @@ pub enum Level {
     Unknown,
 }
 impl Level {
-    fn parse(value: &str) -> Self {
+    pub(crate) fn parse(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
             "trace" => Self::Trace,
             "debug" => Self::Debug,
@@ -174,18 +174,16 @@ impl Index {
 
     fn insert(&mut self, line: &[u8]) {
         let parsed = serde_json::from_slice::<serde_json::Value>(line).ok();
-        let object = parsed.as_ref().filter(|v| v.is_object());
-        let timestamp = object
-            .and_then(|v| v["timestamp"].as_str())
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|t| t.timestamp_millis());
-        let level = object
-            .and_then(|v| v["level"].as_str())
-            .map(Level::parse)
-            .unwrap_or_default();
-        let raw_target = object.and_then(|v| v["target"].as_str()).unwrap_or("");
-        let mut truncated = raw_target.len() > 4096;
-        let mut target = if truncated { "" } else { raw_target };
+        let record = crate::record::decode(parsed.as_ref(), "");
+        let timestamp = record.timestamp;
+        let level = record.level;
+        let raw_target = record.target;
+        let mut truncated = record.truncated || raw_target.len() > 4096;
+        let mut target = if raw_target.len() > 4096 {
+            ""
+        } else {
+            raw_target
+        };
         if self.targets.get(target).is_none() && self.target_bytes + target.len() > MAX_TARGET_BYTES
         {
             self.evict();
@@ -198,7 +196,7 @@ impl Index {
             self.target_bytes += target.len();
             self.targets.get_or_intern(target)
         });
-        let unparsed = object.is_none();
+        let unparsed = record.unparsed;
         self.malformed += u64::from(unparsed);
         self.truncated += u64::from(truncated);
         self.entries.push_back(Entry {

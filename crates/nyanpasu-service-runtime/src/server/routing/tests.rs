@@ -68,6 +68,14 @@ impl TestEnv {
             hub: EventHub::new(),
             runtime,
             logger: Logger::new(),
+            core_logs: nyanpasu_logging::LogsClient::start(
+                Arc::new(nyanpasu_logging::FsCoreLogFiles::new(
+                    root.join("core-runtime/logs"),
+                )),
+                Arc::new(nyanpasu_logging::MonotonicClock::default()),
+            )
+            .await
+            .unwrap(),
             logs: nyanpasu_logging::LogsClient::start(
                 Arc::new(nyanpasu_logging::FsLogFiles::new(
                     root.join("service-logs"),
@@ -178,6 +186,153 @@ async fn viewer_rpc_reads_files_and_scopes_sessions() {
 }
 
 #[tokio::test]
+async fn core_viewer_rpc_isolates_sources_and_owners_while_stopped() {
+    use nyanpasu_ipc::api::{R, log::*};
+    use nyanpasu_logging::*;
+    let env = TestEnv::new().await;
+    let directory = env._dir.path().join("core-runtime/logs");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("core-000001.jsonl"),
+        b"{\"t\":\"log\",\"at\":123,\"level\":\"info\",\"message\":\"core startup failure\"}\n",
+    )
+    .unwrap();
+    let app = create_router(env.state.clone());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(CORE_LOG_FILES_ENDPOINT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let catalog: R<'static, LogResult<Vec<LogFileInfo>>> = body_of(response).await;
+    assert_eq!(catalog.data.unwrap().unwrap().len(), 1);
+    let post = |endpoint: &str, body: serde_json::Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri(endpoint)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let response=app.clone().oneshot(post(CORE_LOG_OPEN_ENDPOINT,serde_json::json!({"owner":"client/window","request":{"request_id":"open","file":null}}))).await.unwrap();
+    let opened: R<'static, LogResult<LogSession>> = body_of(response).await;
+    let session = opened.data.unwrap().unwrap();
+    let request = QueryLogs {
+        session: session.id.clone(),
+        filter: Filter::default(),
+        direction: Direction::Latest,
+        cursor: None,
+        limit: 200,
+    };
+    let page = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let response = app
+                .clone()
+                .oneshot(post(
+                    CORE_LOG_QUERY_ENDPOINT,
+                    serde_json::json!({"owner":"client/window","request":request}),
+                ))
+                .await
+                .unwrap();
+            let page: R<'static, LogResult<LogPage>> = body_of(response).await;
+            let page = page.data.unwrap().unwrap();
+            if !page.building {
+                break page;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(page.rows[0].message, "core startup failure");
+    let response = app
+        .clone()
+        .oneshot(post(
+            CORE_LOG_QUERY_ENDPOINT,
+            serde_json::json!({"owner":"another-client","request":request}),
+        ))
+        .await
+        .unwrap();
+    let rejected: R<'static, LogResult<LogPage>> = body_of(response).await;
+    assert_eq!(
+        rejected.data.unwrap().unwrap_err(),
+        LogError::SessionExpired
+    );
+    // A session in the Core owner is never usable through the service-log owner.
+    for endpoint in [LOG_QUERY_ENDPOINT, CORE_LOG_QUERY_ENDPOINT] {
+        let owner = if endpoint == LOG_QUERY_ENDPOINT {
+            "client/window"
+        } else {
+            "another-client"
+        };
+        let response = app
+            .clone()
+            .oneshot(post(
+                endpoint,
+                serde_json::json!({"owner":owner,"request":request}),
+            ))
+            .await
+            .unwrap();
+        let rejected: R<'static, LogResult<LogPage>> = body_of(response).await;
+        assert_eq!(
+            rejected.data.unwrap().unwrap_err(),
+            LogError::SessionExpired
+        );
+    }
+    for endpoint in [LOG_CLOSE_ENDPOINT, CORE_LOG_CLOSE_ENDPOINT] {
+        let owner = if endpoint == LOG_CLOSE_ENDPOINT {
+            "client/window"
+        } else {
+            "another-client"
+        };
+        let response = app
+            .clone()
+            .oneshot(post(
+                endpoint,
+                serde_json::json!({"owner":owner,"request":session.id}),
+            ))
+            .await
+            .unwrap();
+        let rejected: R<'static, LogResult<()>> = body_of(response).await;
+        if endpoint == LOG_CLOSE_ENDPOINT {
+            // Closing an unknown ID is idempotent; the Core session remains open below.
+            assert!(rejected.data.unwrap().is_ok());
+        } else {
+            assert_eq!(
+                rejected.data.unwrap().unwrap_err(),
+                LogError::SessionExpired
+            );
+        }
+    }
+    assert_eq!(
+        env.state
+            .core_logs
+            .query("client/window".into(), request.clone())
+            .await
+            .unwrap()
+            .rows[0]
+            .message,
+        "core startup failure"
+    );
+    let response = app
+        .oneshot(post(
+            CORE_LOG_CLOSE_ENDPOINT,
+            serde_json::json!({"owner":"client/window","request":session.id}),
+        ))
+        .await
+        .unwrap();
+    let closed: R<'static, LogResult<()>> = body_of(response).await;
+    assert!(closed.data.unwrap().is_ok());
+    env.state.logs.shutdown().await.unwrap();
+    env.state.core_logs.shutdown().await.unwrap();
+    env.state.core_manager.shutdown().await;
+}
+
+#[tokio::test]
 async fn status_reports_a_stopped_core_and_echoes_the_injected_runtime_dirs() {
     let env = TestEnv::new().await;
     let runtime = env.state.runtime.clone();
@@ -197,6 +352,14 @@ async fn status_reports_a_stopped_core_and_echoes_the_injected_runtime_dirs() {
     assert_eq!(envelope.msg, ResponseCode::Ok.msg());
     let body = envelope.data.unwrap();
     assert_eq!(body.version, crate::consts::APP_VERSION);
+    assert_eq!(
+        body.log_query_version,
+        Some(nyanpasu_ipc::api::log::LOG_QUERY_VERSION)
+    );
+    assert_eq!(
+        body.core_log_query_version,
+        Some(nyanpasu_ipc::api::log::CORE_LOG_QUERY_VERSION)
+    );
     assert!(matches!(body.core_infos.state, CoreState::Stopped(None)));
     assert!(body.core_infos.r#type.is_none());
     assert!(body.core_infos.config_path.is_none());

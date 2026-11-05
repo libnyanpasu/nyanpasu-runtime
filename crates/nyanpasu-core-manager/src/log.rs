@@ -9,7 +9,7 @@ use std::borrow::Borrow;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone};
 
-pub use nyanpasu_core_metadata::{LogField, LogFrame, LogLevel, LogStream, LogTimestamp};
+pub use nyanpasu_logging::{LogField, LogFrame, LogLevel, LogStream, LogTimestamp};
 
 use crate::kind::CoreKind;
 
