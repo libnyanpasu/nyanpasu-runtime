@@ -1,0 +1,5 @@
+time="2026-11-05T21:38:41.411747068-08:00" level=info msg="Start initial configuration in progress"
+time="2026-11-05T21:38:41.411781899-08:00" level=info msg="Geodata Loader mode: memconservative"
+time="2026-11-05T21:38:41.411784449-08:00" level=info msg="Geosite Matcher implementation: succinct"
+time="2026-11-05T21:38:41.411788977-08:00" level=error msg="rules[0] [UNKNOWNRULE,example.invalid,DIRECT] error: unsupported rule type: UNKNOWNRULE"
+configuration file /tmp/kernel-audit/configs/d_unknown_rule.yaml test failed

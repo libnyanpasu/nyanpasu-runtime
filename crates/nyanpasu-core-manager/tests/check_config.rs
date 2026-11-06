@@ -1,6 +1,6 @@
 mod common;
 
-use nyanpasu_core_manager::{Error, kind::check_config};
+use nyanpasu_core_manager::{CoreConfigCheckDiagnostic, Error, kind::check_config};
 
 #[tokio::test]
 async fn check_config_passes_and_fails() {
@@ -19,7 +19,16 @@ async fn check_config_passes_and_fails() {
     bad_spec.config_path = dir.join("bad.yaml");
     let err = check_config(&bad_spec).await.expect_err("must fail");
     match err {
-        Error::ConfigCheckFailed(msg) => assert_eq!(msg, "port already in use"),
+        Error::ConfigCheckFailed {
+            message,
+            config_check_diagnostic,
+        } => {
+            assert_eq!(message, "port already in use");
+            assert!(matches!(
+                config_check_diagnostic,
+                Some(CoreConfigCheckDiagnostic::Unrecognized { .. })
+            ));
+        }
         other => panic!("unexpected error: {other}"),
     }
 }
@@ -60,7 +69,13 @@ async fn a_hung_check_is_bounded_by_its_timeout() {
     );
     assert!(started.exists(), "the fake core must actually have started");
     match err {
-        Error::ConfigCheckFailed(msg) => assert!(msg.contains("timed out"), "{msg}"),
+        Error::ConfigCheckFailed {
+            message,
+            config_check_diagnostic,
+        } => {
+            assert_eq!(message, "config check timed out after 300ms");
+            assert_eq!(config_check_diagnostic, None);
+        }
         other => panic!("unexpected error: {other}"),
     }
 }

@@ -1,0 +1,3 @@
+time="2026-11-05T21:38:41.697467040-08:00" level=info msg="Start initial configuration in progress"
+time="2026-11-05T21:38:41.697557819-08:00" level=error msg="proxy group[0]: G: 'H': 'X' not found: 'Y' not found"
+configuration file /tmp/kernel-audit/configs/a_delimiters.yaml test failed

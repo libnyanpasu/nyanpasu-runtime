@@ -926,3 +926,60 @@ async fn a_server_error_kind_reaches_the_client() {
     let _ = shutdown.send(());
     cleanup(&placeholder);
 }
+
+#[tokio::test]
+async fn check_diagnostics_survive_both_http_error_decode_paths() {
+    use nyanpasu_ipc::api::{
+        CoreConfigCheckDiagnostic,
+        core::check::{CORE_CHECK_ENDPOINT, CoreCheckReq, CoreCheckRes},
+    };
+
+    for (index, status) in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK]
+        .into_iter()
+        .enumerate()
+    {
+        let placeholder = format!("nyanpasu-ipc-test-{}-check{index}", std::process::id());
+        let router = Router::new()
+            .route(STATUS_ENDPOINT, get(status_handler))
+            .route(
+                CORE_CHECK_ENDPOINT,
+                post(move || async move {
+                    let mut envelope: CoreCheckRes<'static> = RBuilder::other_error_with_kind(
+                        Cow::Borrowed("config check failed"),
+                        Some(CoreErrorKind::ConfigCheckFailed),
+                        Some(false),
+                    );
+                    envelope.config_check_diagnostic =
+                        Some(CoreConfigCheckDiagnostic::MissingGroupMember {
+                            group: "自动优选".into(),
+                            member: "X VA".into(),
+                        });
+                    (status, Json(envelope))
+                }),
+            );
+        let Some((shutdown, client)) = run_server(&placeholder, router).await else {
+            return;
+        };
+        let error = client
+            .check_config(&CoreCheckReq {
+                core_type: Cow::Owned(CoreType::Clash(ClashCoreType::Mihomo)),
+                config_file: Cow::Owned(PathBuf::from("candidate.yaml")),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.core_error_kind(),
+            Some(CoreErrorKind::ConfigCheckFailed)
+        );
+        assert!(!error.retryable());
+        assert_eq!(
+            error.config_check_diagnostic(),
+            Some(&CoreConfigCheckDiagnostic::MissingGroupMember {
+                group: "自动优选".into(),
+                member: "X VA".into()
+            })
+        );
+        let _ = shutdown.send(());
+        cleanup(&placeholder);
+    }
+}

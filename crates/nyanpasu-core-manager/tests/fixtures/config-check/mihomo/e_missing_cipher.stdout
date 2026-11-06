@@ -1,0 +1,3 @@
+time="2026-11-05T21:38:41.418342489-08:00" level=info msg="Start initial configuration in progress"
+time="2026-11-05T21:38:41.418441304-08:00" level=error msg="proxy 0: '' has unset fields: cipher"
+configuration file /tmp/kernel-audit/configs/e_missing_cipher.yaml test failed

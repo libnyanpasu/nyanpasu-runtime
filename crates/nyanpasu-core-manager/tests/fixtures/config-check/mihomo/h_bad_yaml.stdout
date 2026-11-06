@@ -1,0 +1,2 @@
+time="2026-11-05T21:38:41.429048315-08:00" level=error msg="yaml: line 2: did not find expected '-' indicator"
+configuration file /tmp/kernel-audit/configs/h_bad_yaml.yaml test failed

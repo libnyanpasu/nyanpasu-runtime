@@ -1,0 +1,1 @@
+21:38:41 ERR [Config] configuration file test failed error=loop is detected in ProxyGroup, please check following ProxyGroups: [A B] path=/tmp/kernel-audit/configs/g_group_cycle.yaml

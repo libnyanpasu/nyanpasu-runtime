@@ -1,0 +1,5 @@
+2026-11-06T05:38:41.522582Z  INFO meow: meow-rs starting...
+2026-11-06T05:38:41.529482Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.530085Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.530110Z  INFO meow_config: Config loaded: mode=rule, proxies=7, rules=1
+2026-11-06T05:38:41.530115Z  INFO meow: Configuration test passed
