@@ -1,0 +1,1 @@
+configuration file /tmp/kernel-audit/configs/e_unknown_proxy_type.yaml test failed: invalid config: could not parse config content: unknown variant `UNKNOWNPROXY`, expected one of `direct`, `reject`, `ss`, `socks5`, `anytls`, `trojan`, `vmess`, `vless`, `wireguard`, `tor`, `tuic`, `hysteria2`, `ssh`, `shadowquic`, `tailscale`

@@ -88,7 +88,10 @@ async fn spawn_error_removes_the_secret_runtime_config() {
         .start(common::mihomo_spec(&dir, config))
         .await
         .expect_err("config check must fail");
-    assert!(matches!(error, Error::ConfigCheckFailed(_)), "got {error}");
+    assert!(
+        matches!(error, Error::ConfigCheckFailed { .. }),
+        "got {error}"
+    );
     assert!(matches!(
         manager.status().state,
         CoreState::Stopped {

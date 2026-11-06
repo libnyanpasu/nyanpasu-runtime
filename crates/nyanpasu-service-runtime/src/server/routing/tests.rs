@@ -830,3 +830,63 @@ async fn effective_config_contract_returns_no_snapshot_when_stopped() {
     assert_eq!(envelope.code, ResponseCode::Ok);
     assert!(envelope.data.flatten().is_none());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn checking_a_rejected_config_carries_diagnostics_and_replaces_its_owned_path() {
+    use nyanpasu_ipc::api::CoreConfigCheckDiagnostic;
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new().await;
+    let core_type = CoreType::Clash(ClashCoreType::Mihomo);
+    let data_dir = &env.state.runtime.nyanpasu_data_dir;
+    std::fs::create_dir_all(data_dir).unwrap();
+    let binary = data_dir.join(core_type.get_executable_name());
+    let config = env._dir.path().join("candidate.yaml");
+    std::fs::write(&config, "mode: rule\n").unwrap();
+    for (cause, expected) in [
+        ("proxy 2: invalid proxy", CoreConfigCheckDiagnostic::Proxy { index: 2 }),
+        ("unknown failure", CoreConfigCheckDiagnostic::Unrecognized {
+            raw: "time=\"t\" level=error msg=\"unknown failure\"\nconfiguration file <checked-config> test failed".into(),
+        }),
+    ] {
+        std::fs::write(
+            &binary,
+            format!(
+                r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-f" ]; then
+        shift
+        config_path="$1"
+    fi
+    shift
+done
+printf '%s\n' 'time="t" level=error msg="{cause}"'
+printf 'configuration file %s test failed\n' "$config_path"
+exit 1
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let response = post_json(
+            env.state.clone(),
+            CoreCheck::PATH,
+            &CoreCheckReq {
+                core_type: Cow::Borrowed(&core_type),
+                config_file: Cow::Borrowed(&config),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let envelope: CoreCheckRes<'static> = body_of(response).await;
+        assert_eq!(envelope.error_kind.as_deref(), Some("config_check_failed"));
+        assert_eq!(
+            envelope.msg,
+            format!(
+                "config check failed: {cause}\nconfiguration file <checked-config> test failed"
+            )
+        );
+        assert_eq!(envelope.config_check_diagnostic, Some(expected));
+    }
+}

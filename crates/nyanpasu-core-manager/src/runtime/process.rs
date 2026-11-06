@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     epoch::Epoch,
-    error::Error,
+    error::{CoreConfigCheckDiagnostic, Error},
     instance::Instance,
     probe::{ProbeHandle, ProbePhase, ProbeResult},
     spec::{InstanceSpec, ResolvedController},
@@ -164,12 +164,28 @@ impl RuntimeBackend for ProcessRuntimeBackend {
                 isolated.config_path = isolated.working_dir.join("check.yaml");
                 tokio::fs::write(&isolated.config_path, serde_yaml_ng::to_string(&document)?)
                     .await?;
-                crate::kind::check_config_with_source(&isolated, store.data_dir()).await
+                crate::kind::check_config_with_source(&isolated, store.data_dir())
+                    .await
+                    .map_err(|error| replace_check_path(error, &isolated.config_path))
             } else {
                 crate::kind::check_config(spec).await
             }
         })
     }
+}
+
+fn replace_check_path(mut error: Error, path: &camino::Utf8Path) -> Error {
+    if let Error::ConfigCheckFailed {
+        message,
+        config_check_diagnostic,
+    } = &mut error
+    {
+        *message = message.replace(path.as_str(), "<checked-config>");
+        if let Some(CoreConfigCheckDiagnostic::Unrecognized { raw }) = config_check_diagnostic {
+            *raw = raw.replace(path.as_str(), "<checked-config>");
+        }
+    }
+    error
 }
 
 impl RuntimeInstance for Instance {
@@ -206,5 +222,61 @@ impl RuntimeInstance for Instance {
         timeout: Duration,
     ) -> BoxFuture<'static, Result<(), Error>> {
         Box::pin(Instance::stop_and_confirm_dead(*self, timeout))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8Path;
+
+    #[test]
+    fn replaces_only_the_exact_owned_check_path_in_message_and_fallback() {
+        for path in ["/tmp/检查 dir/check.yaml", r"C:\TEMP\检查 dir\check.yaml"] {
+            let other = "/unrelated/check.yaml";
+            let message = format!("{path}\n{other}\n{path}");
+            let error = replace_check_path(
+                Error::ConfigCheckFailed {
+                    message: message.clone(),
+                    config_check_diagnostic: Some(CoreConfigCheckDiagnostic::Unrecognized {
+                        raw: message,
+                    }),
+                },
+                Utf8Path::new(path),
+            );
+            let Error::ConfigCheckFailed {
+                message,
+                config_check_diagnostic,
+            } = error
+            else {
+                panic!("expected check failure")
+            };
+            let expected = format!("<checked-config>\n{other}\n<checked-config>");
+            assert_eq!(message, expected);
+            assert_eq!(
+                config_check_diagnostic,
+                Some(CoreConfigCheckDiagnostic::Unrecognized { raw: expected })
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_preserves_typed_names_and_unrelated_errors() {
+        let path = Utf8Path::new("/tmp/check.yaml");
+        let diagnostic = CoreConfigCheckDiagnostic::MissingGroupMember {
+            group: path.as_str().into(),
+            member: "X".into(),
+        };
+        let error = replace_check_path(
+            Error::ConfigCheckFailed {
+                message: "no path here".into(),
+                config_check_diagnostic: Some(diagnostic.clone()),
+            },
+            path,
+        );
+        assert_eq!(error.to_string(), "config check failed: no path here");
+        assert_eq!(error.config_check_diagnostic(), Some(&diagnostic));
+        let error = replace_check_path(Error::InvalidConfig(path.as_str().into()), path);
+        assert_eq!(error.to_string(), "invalid runtime config: /tmp/check.yaml");
     }
 }

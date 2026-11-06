@@ -1,0 +1,1 @@
+21:38:41 ERR [Config] configuration file test failed error=rules[0] [DOMAIN,example.invalid,MISSING] error: proxy [MISSING] not found path=/tmp/kernel-audit/configs/c_missing_rule_target.yaml

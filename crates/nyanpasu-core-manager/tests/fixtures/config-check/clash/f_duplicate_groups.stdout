@@ -1,0 +1,1 @@
+21:38:41 ERR [Config] configuration file test failed error=ProxyGroup G: duplicate group name path=/tmp/kernel-audit/configs/f_duplicate_groups.yaml

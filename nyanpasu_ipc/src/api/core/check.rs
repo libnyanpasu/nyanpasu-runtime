@@ -20,6 +20,7 @@ pub struct CoreCheckReq<'n> {
 
 /// A rejected config is an error envelope with
 /// `error_kind = "config_check_failed"` and the core's own diagnostic in `msg`,
+/// with optional typed detail in [`R::config_check_diagnostic`],
 /// not a `200` carrying `ok: false` — every other operation in this protocol
 /// reports failure through the envelope, and a second convention for one
 /// endpoint would fragment it.

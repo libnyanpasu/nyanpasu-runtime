@@ -24,7 +24,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use zerocopy::{ByteEq, ByteHash, FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::{
-    error::CoreErrorKind,
+    error::{CoreConfigCheckDiagnostic, CoreErrorKind},
     log::LogFrame,
     manager::{ApplyOutcome, CoreManager},
     spec::{CoreSpec, InstanceOptions, InstanceSpec},
@@ -244,6 +244,8 @@ pub struct CoreError {
     pub kind: Option<CoreErrorKind>,
     /// Human-readable and unstable; never a branch condition.
     pub message: String,
+    /// The kernel's check diagnostic, absent for timeouts and other failures.
+    pub config_check_diagnostic: Option<CoreConfigCheckDiagnostic>,
     /// Whether resubmitting the same envelope can plausibly succeed. Set by
     /// the producer: the same kind can be retryable in one situation and not
     /// another (an `OperationConflict` from a handoff in progress is; one from
@@ -257,6 +259,7 @@ impl CoreError {
         Self {
             kind: Some(kind),
             message: message.into(),
+            config_check_diagnostic: None,
             retryable,
             operation_id: None,
         }
@@ -267,6 +270,7 @@ impl CoreError {
         Self {
             kind,
             message: error.to_string(),
+            config_check_diagnostic: error.config_check_diagnostic().cloned(),
             retryable: kind.is_some_and(|kind| kind.default_retryable()),
             operation_id,
         }
