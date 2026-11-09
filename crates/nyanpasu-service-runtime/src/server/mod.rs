@@ -42,8 +42,11 @@ pub async fn run(
     .load()?
     .map(|owner| owner.uid);
     let native_store = Arc::new(native_store_for_host(&runtime)?);
-    let (controller_dir, access): (_, Arc<dyn nyanpasu_core_manager::ControllerAccess>) =
-        controller_access_for_host(sids)?;
+    let (controller_dir, access) = controller_access_for_host(
+        sids,
+        #[cfg(target_os = "linux")]
+        socket_owner_uid,
+    )?;
     let core_manager = CoreManager::with_controller_access(
         runtime_dir,
         local_ipc_policy,
@@ -215,6 +218,7 @@ async fn drain<E: std::error::Error + Send + Sync + 'static>(
 fn controller_access_for_host(
     #[cfg(windows)] sids: &[&str],
     #[cfg(not(windows))] _sids: (),
+    #[cfg(target_os = "linux")] desktop_uid: Option<u32>,
 ) -> anyhow::Result<(
     Option<camino::Utf8PathBuf>,
     Arc<dyn nyanpasu_core_manager::ControllerAccess>,
@@ -244,7 +248,12 @@ fn controller_access_for_host(
         if error == 0 && !result.is_null() {
             let gid = unsafe { group.assume_init().gr_gid };
             let root = std::path::Path::new("/var/run/nyanpasu-core");
-            match controller_access::UnixControllerAccess::prepare(root, gid) {
+            match controller_access::UnixControllerAccess::prepare(
+                root,
+                gid,
+                #[cfg(target_os = "linux")]
+                desktop_uid,
+            ) {
                 Ok(access) => {
                     let path = root
                         .canonicalize()
