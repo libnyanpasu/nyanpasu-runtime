@@ -123,12 +123,15 @@ pub async fn create_server(
 
     let listener = options.create_tokio()?;
     let listener = InterProcessListener(listener, name_str);
-    // The desktop owner may have been added to the IPC group after its GUI
-    // process started, so relying only on supplementary groups can leave a
-    // freshly installed service unreachable until the user signs in again.
-    tracing::debug!("changing socket owner, group and permissions...");
-    crate::utils::os::change_socket_owner(placeholder, socket_owner_uid)?;
-    crate::utils::os::change_socket_mode(placeholder, socket_owner_uid)?;
+    #[cfg(unix)]
+    {
+        // The desktop owner may have been added to the IPC group after its GUI
+        // process started, so relying only on supplementary groups can leave a
+        // freshly installed service unreachable until the user signs in again.
+        tracing::debug!("changing socket owner, group and permissions...");
+        crate::utils::os::change_socket_owner(placeholder, socket_owner_uid)?;
+        crate::utils::os::change_socket_mode(placeholder, socket_owner_uid)?;
+    }
 
     tracing::debug!("mounting service...");
     let server = axum::serve(listener, app);
