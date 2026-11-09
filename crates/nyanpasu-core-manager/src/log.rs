@@ -5,6 +5,10 @@
 //! ANSI when writing to a pipe. Parsing is header-only and per kind: a line whose
 //! header does not match degrades to an unformatted frame instead of being lost.
 
+mod config_check;
+
+pub(crate) use config_check::parse_config_check_output;
+
 use std::borrow::Borrow;
 
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone};

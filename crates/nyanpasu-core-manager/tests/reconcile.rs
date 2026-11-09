@@ -129,7 +129,7 @@ async fn a_rejected_config_aborts_cleanly_while_the_old_core_keeps_running() {
         .reconcile(rejected_spec, Some(revision.id()))
         .await
         .expect_err("the dry-run rejection must abort the transaction");
-    assert!(matches!(error, Error::ConfigCheckFailed(_)), "{error}");
+    assert!(matches!(error, Error::ConfigCheckFailed { .. }), "{error}");
 
     // Clean abort: the old core is still running on the old revision.
     let status = manager.status();

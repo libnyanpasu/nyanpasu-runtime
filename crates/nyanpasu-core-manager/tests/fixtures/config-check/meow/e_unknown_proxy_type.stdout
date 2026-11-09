@@ -1,0 +1,7 @@
+2026-11-06T05:38:41.530559Z  INFO meow: meow-rs starting...
+2026-11-06T05:38:41.532921Z  WARN meow_config: Failed to parse proxy: unsupported proxy type: UNKNOWNPROXY
+2026-11-06T05:38:41.532986Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.533148Z  WARN meow_config: Failed to parse proxy: unsupported proxy type: UNKNOWNPROXY
+2026-11-06T05:38:41.533159Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.533234Z  INFO meow_config: Config loaded: mode=rule, proxies=7, rules=1
+2026-11-06T05:38:41.533253Z  INFO meow: Configuration test passed

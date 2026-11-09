@@ -1,0 +1,1 @@
+21:38:41 ERR [Config] configuration file test failed error=proxy 0: unsupport proxy type: UNKNOWNPROXY path=/tmp/kernel-audit/configs/e_unknown_proxy_type.yaml

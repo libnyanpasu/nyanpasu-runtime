@@ -1,5 +1,5 @@
 use camino::Utf8PathBuf;
-pub use nyanpasu_core_metadata::CoreErrorKind;
+pub use nyanpasu_core_metadata::{CoreConfigCheckDiagnostic, CoreErrorKind};
 
 use crate::{Epoch, kind::CoreKind, state::RevisionId};
 
@@ -27,8 +27,11 @@ pub enum Error {
         "core `{kind}` version `{version}` does not support the required local IPC transport; use LocalIpcPolicy::Prefer or LocalIpcPolicy::Disable"
     )]
     RequiredLocalIpcUnsupported { kind: CoreKind, version: String },
-    #[error("config check failed: {0}")]
-    ConfigCheckFailed(String),
+    #[error("config check failed: {message}")]
+    ConfigCheckFailed {
+        message: String,
+        config_check_diagnostic: Option<CoreConfigCheckDiagnostic>,
+    },
     #[error("invalid runtime config: {0}")]
     InvalidConfig(String),
     #[error("invalid manager options: {0}")]
@@ -83,6 +86,18 @@ pub enum Error {
 }
 
 impl Error {
+    /// The kernel's typed check diagnostic, when a failed check produced one.
+    pub fn config_check_diagnostic(&self) -> Option<&CoreConfigCheckDiagnostic> {
+        match self {
+            Self::ConfigCheckFailed {
+                config_check_diagnostic,
+                ..
+            } => config_check_diagnostic.as_ref(),
+            Self::DurabilityUncertain { source, .. } => source.config_check_diagnostic(),
+            _ => None,
+        }
+    }
+
     /// The machine-readable classification a caller can branch on, or `None`
     /// when this failure has none.
     ///
@@ -102,7 +117,7 @@ impl Error {
             Self::ConfigNotFound(_) => Some(CoreErrorKind::ConfigNotFound),
             Self::BinaryNotFound(_) => Some(CoreErrorKind::BinaryNotFound),
             Self::ControllerMissing => Some(CoreErrorKind::ControllerMissing),
-            Self::ConfigCheckFailed(_) => Some(CoreErrorKind::ConfigCheckFailed),
+            Self::ConfigCheckFailed { .. } => Some(CoreErrorKind::ConfigCheckFailed),
             Self::InvalidConfig(_) | Self::Yaml(_) => Some(CoreErrorKind::InvalidConfig),
             Self::StopUnconfirmed(_) => Some(CoreErrorKind::StopUnconfirmed),
             Self::ManagerQuarantined { .. } => Some(CoreErrorKind::Quarantined),
@@ -176,7 +191,10 @@ mod tests {
                 Some(CoreErrorKind::Quarantined),
             ),
             (
-                Error::ConfigCheckFailed("unknown field".to_owned()),
+                Error::ConfigCheckFailed {
+                    message: "unknown field".to_owned(),
+                    config_check_diagnostic: None,
+                },
                 Some(CoreErrorKind::ConfigCheckFailed),
             ),
             (

@@ -1,0 +1,5 @@
+time="2026-11-05T21:38:41.487889519-08:00" level=info msg="Start initial configuration in progress"
+time="2026-11-05T21:38:41.487917376-08:00" level=info msg="Geodata Loader mode: memconservative"
+time="2026-11-05T21:38:41.487919864-08:00" level=info msg="Geosite Matcher implementation: succinct"
+time="2026-11-05T21:38:41.487923533-08:00" level=error msg="rules[0] [DOMAIN,example.invalid,MISSING] error: proxy [MISSING] not found"
+configuration file /tmp/kernel-audit/configs/c_missing_rule_target.yaml test failed

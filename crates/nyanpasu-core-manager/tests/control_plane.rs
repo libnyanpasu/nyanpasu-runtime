@@ -331,12 +331,20 @@ async fn the_advisory_check_neither_queues_nor_disturbs_the_runtime() {
         .check(CheckRequest {
             core: spec.core,
             config: ConfigInput::inline(
-                config_body(port, "x-fake-core:\n  check-fail: port already in use\n").into_bytes(),
+                config_body(
+                    port,
+                    "x-fake-core:\n  check-fail: 'proxy 2: invalid proxy'\n",
+                )
+                .into_bytes(),
             ),
         })
         .await
         .expect_err("the core's dry-run rejection surfaces");
     assert_eq!(error.kind, Some(CoreErrorKind::ConfigCheckFailed));
+    assert_eq!(
+        error.config_check_diagnostic,
+        Some(nyanpasu_core_manager::CoreConfigCheckDiagnostic::Proxy { index: 2 })
+    );
 
     // Advisory means advisory: the runtime never moved.
     let status = control.status();

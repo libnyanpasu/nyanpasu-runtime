@@ -1,0 +1,1 @@
+21:38:41 ERR [Config] configuration file test failed error=rules[0] [UNKNOWNRULE,example.invalid,DIRECT] error: unsupported rule type UNKNOWNRULE path=/tmp/kernel-audit/configs/d_unknown_rule.yaml

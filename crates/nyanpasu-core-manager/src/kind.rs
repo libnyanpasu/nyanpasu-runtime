@@ -7,7 +7,7 @@ use nyanpasu_utils::process::ProcessError;
 
 use crate::{
     error::Error,
-    log::{CapturedOutput, summarize_output},
+    log::{CapturedOutput, parse_config_check_output},
 };
 
 pub use nyanpasu_core_metadata::ClashCoreKind as CoreKind;
@@ -158,26 +158,33 @@ async fn run_check(
             // process error because that is what the caller asked about: the
             // config did not validate. Same wire kind (`config_check_failed`),
             // and the message names the bound so a slow core is diagnosable.
-            ProcessError::Timeout { after } => {
-                Error::ConfigCheckFailed(format!("config check timed out after {after:?}"))
-            }
+            ProcessError::Timeout { after } => Error::ConfigCheckFailed {
+                message: format!("config check timed out after {after:?}"),
+                config_check_diagnostic: None,
+            },
             other => Error::Process(other),
         })?;
     if output.success() {
         return Ok(());
     }
-    Err(Error::ConfigCheckFailed(summarize_output(
+    let failure = parse_config_check_output(
         spec.core.kind,
         CapturedOutput {
             stdout: &output.stdout,
             stderr: &output.stderr,
         },
-    )))
+        &spec.config_path,
+    );
+    Err(Error::ConfigCheckFailed {
+        message: failure.message,
+        config_check_diagnostic: Some(failure.diagnostic),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log::summarize_output;
     use camino::Utf8PathBuf;
 
     #[test]

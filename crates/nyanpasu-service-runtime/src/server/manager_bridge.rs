@@ -7,11 +7,11 @@ use std::{
 use camino::{Utf8Path, Utf8PathBuf};
 use nyanpasu_core_manager::{
     ApplyOutcome, ConfigInput, ConfigRevision, ControlOptions, CoreCommand, CoreCommandEnvelope,
-    CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind, CoreManager as Manager,
-    CoreSpec, CoreState as ManagerCoreState, CoreStatus, Epoch, Error as ManagerError,
-    ExecutorExit, HealthState, HealthStatus, Host, InstanceOptions, InstanceSpec, LocalIpcPolicy,
-    LogFrame, LogLevel, ManagerOptions, OperationHandle, OperationId, OperationOutput,
-    OperationState, ReconcileRequest, RevisionId, native_store::NativeStore,
+    CoreConfigCheckDiagnostic, CoreControl, CoreError as ControlError, CoreErrorKind, CoreKind,
+    CoreManager as Manager, CoreSpec, CoreState as ManagerCoreState, CoreStatus, Epoch,
+    Error as ManagerError, ExecutorExit, HealthState, HealthStatus, Host, InstanceOptions,
+    InstanceSpec, LocalIpcPolicy, LogFrame, LogLevel, ManagerOptions, OperationHandle, OperationId,
+    OperationOutput, OperationState, ReconcileRequest, RevisionId, native_store::NativeStore,
 };
 use nyanpasu_ipc::api::{
     R, RBuilder,
@@ -72,6 +72,7 @@ pub(crate) struct OpError {
     /// is the client's fallback, and repeating it here would turn a guess into
     /// an assertion on the wire.
     retryable: Option<bool>,
+    config_check_diagnostic: Option<CoreConfigCheckDiagnostic>,
 }
 
 impl OpError {
@@ -82,6 +83,7 @@ impl OpError {
             kind: None,
             message: message.into(),
             retryable: None,
+            config_check_diagnostic: None,
         }
     }
 
@@ -92,6 +94,7 @@ impl OpError {
             kind: Some(kind),
             message: message.into(),
             retryable: None,
+            config_check_diagnostic: None,
         }
     }
 
@@ -107,7 +110,10 @@ impl OpError {
     where
         T: Serialize + DeserializeOwned + std::fmt::Debug,
     {
-        RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind, self.retryable)
+        let mut envelope =
+            RBuilder::other_error_with_kind(Cow::Owned(self.message), self.kind, self.retryable);
+        envelope.config_check_diagnostic = self.config_check_diagnostic;
+        envelope
     }
 }
 
@@ -116,6 +122,7 @@ impl From<ManagerError> for OpError {
         Self {
             kind: error.kind(),
             retryable: None,
+            config_check_diagnostic: error.config_check_diagnostic().cloned(),
             message: match &error {
                 // The legacy wire string the GUI already branches on, so
                 // `apply` on a stopped core reads exactly like `restart` on
@@ -842,11 +849,13 @@ fn echo_commits(state: &OperationState) -> bool {
 
 fn op_error_from_control(error: ControlError) -> OpError {
     let retryable = error.retryable;
-    match error.kind {
+    let mut mapped = match error.kind {
         Some(kind) => OpError::with_kind(kind, error.message),
         None => OpError::plain(error.message),
     }
-    .retryable(retryable)
+    .retryable(retryable);
+    mapped.config_check_diagnostic = error.config_check_diagnostic;
+    mapped
 }
 
 fn map_operation(id: OperationId, state: OperationState) -> OperationInfo {
@@ -1074,6 +1083,31 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
+
+    #[test]
+    fn check_diagnostics_survive_domain_and_control_envelopes() {
+        let diagnostic = CoreConfigCheckDiagnostic::Proxy { index: 2 };
+        let error = ManagerError::ConfigCheckFailed {
+            message: "proxy 2: invalid".into(),
+            config_check_diagnostic: Some(diagnostic.clone()),
+        };
+        let control = ControlError::from_domain(&error, None);
+        let local_envelope: R<'static, ()> = op_error_from_control(control).into_envelope();
+        let service_envelope: R<'static, ()> = OpError::from(error).into_envelope();
+        for envelope in [local_envelope, service_envelope] {
+            assert_eq!(envelope.config_check_diagnostic, Some(diagnostic.clone()));
+            assert_eq!(envelope.error_kind.as_deref(), Some("config_check_failed"));
+            assert_eq!(envelope.msg, "config check failed: proxy 2: invalid");
+        }
+        let timeout = ManagerError::ConfigCheckFailed {
+            message: "config check timed out after 30s".into(),
+            config_check_diagnostic: None,
+        };
+        let envelope: R<'static, ()> = OpError::from(timeout).into_envelope();
+        assert_eq!(envelope.error_kind.as_deref(), Some("config_check_failed"));
+        assert_eq!(envelope.config_check_diagnostic, None);
+        assert_eq!(envelope.retryable, None);
+    }
 
     fn simulate(states: &[ManagerCoreState]) -> Vec<String> {
         let mut last = CoreState::Stopped(None);

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// Absent means "not classified", never "no error": only the operations added
 /// in S8 populate it, and only for the failures listed here. Mapping the
 /// manager's remaining error variants is report P3.
-pub use nyanpasu_core_metadata::CoreErrorKind;
+pub use nyanpasu_core_metadata::{CoreConfigCheckDiagnostic, CoreErrorKind};
 use std::{borrow::Cow, fmt::Debug, io::Error as IoError};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -49,8 +49,8 @@ pub struct R<'a, T: Serialize + DeserializeOwned + Debug> {
     pub data: Option<T>,
     #[builder(setter(skip), default = "self.default_ts()")]
     pub ts: i64,
-    /// Machine-readable failure classification, see [`CoreErrorKind`]. Declared
-    /// last and omitted when absent, so every pre-S8 envelope stays
+    /// Machine-readable failure classification, see [`CoreErrorKind`].
+    /// Omitted when absent, so every pre-S8 envelope stays
     /// byte-identical and every pre-S8 payload still decodes.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,6 +62,10 @@ pub struct R<'a, T: Serialize + DeserializeOwned + Debug> {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
+    /// Typed location from a failed kernel check, absent on older services.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_check_diagnostic: Option<CoreConfigCheckDiagnostic>,
 }
 
 impl<T: Serialize + DeserializeOwned + Debug> R<'_, T> {
@@ -108,6 +112,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             ts: crate::utils::get_current_ts(),
             error_kind: None,
             retryable: None,
+            config_check_diagnostic: None,
         }
     }
 
@@ -131,6 +136,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             ts: crate::utils::get_current_ts(),
             error_kind: kind.map(|kind| Cow::Borrowed(kind.as_str())),
             retryable,
+            config_check_diagnostic: None,
         }
     }
 
@@ -143,6 +149,7 @@ impl<'a, T: Serialize + DeserializeOwned + Debug> RBuilder<'a, T> {
             ts: crate::utils::get_current_ts(),
             error_kind: None,
             retryable: None,
+            config_check_diagnostic: None,
         }
     }
 }

@@ -1,0 +1,11 @@
+2026-11-06T05:38:41.545970Z  INFO meow: meow-rs starting...
+2026-11-06T05:38:41.549302Z  WARN meow_config::proxy_parser: Proxy 'MISSING' not found for group 'G', skipping
+2026-11-06T05:38:41.549313Z  WARN meow_config::proxy_parser: Proxy 'MISSING' not found for group 'G', skipping
+2026-11-06T05:38:41.549315Z  WARN meow_config: Failed to parse proxy group 'G': group 'G' has no valid proxies or providers
+2026-11-06T05:38:41.549321Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.549432Z  WARN meow_config::proxy_parser: Proxy 'MISSING' not found for group 'G', skipping
+2026-11-06T05:38:41.549436Z  WARN meow_config::proxy_parser: Proxy 'MISSING' not found for group 'G', skipping
+2026-11-06T05:38:41.549438Z  WARN meow_config: Failed to parse proxy group 'G': group 'G' has no valid proxies or providers
+2026-11-06T05:38:41.549441Z  INFO meow_config: Auto-created GLOBAL selector with all proxies primary="DIRECT"
+2026-11-06T05:38:41.549569Z  INFO meow_config: Config loaded: mode=rule, proxies=7, rules=1
+2026-11-06T05:38:41.549582Z  INFO meow: Configuration test passed

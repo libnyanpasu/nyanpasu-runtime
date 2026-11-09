@@ -1,0 +1,1 @@
+configuration file /tmp/kernel-audit/configs/c_missing_rule_target.yaml test failed: invalid config: proxy `MISSING` referenced in a rule was not found

@@ -100,7 +100,7 @@ async fn real_core_check_config_reports_invalid_config() {
 
     let err = check_config(&spec).await.expect_err("must fail");
     match err {
-        Error::ConfigCheckFailed(msg) => {
+        Error::ConfigCheckFailed { message: msg, .. } => {
             assert!(!msg.is_empty(), "error message should be condensed");
         }
         other => panic!("unexpected error: {other}"),

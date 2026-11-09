@@ -828,3 +828,62 @@ fn the_core_check_request_is_pinned() {
         r#"{"core_type":{"clash":"mihomo"},"config_file":"/etc/nyanpasu/config.yaml"}"#
     );
 }
+
+#[test]
+fn check_diagnostics_are_additive_to_old_envelopes() {
+    use nyanpasu_ipc::api::CoreConfigCheckDiagnostic;
+
+    #[derive(serde::Deserialize)]
+    struct OldEnvelope {
+        code: ResponseCode,
+        msg: String,
+        data: Option<()>,
+        ts: i64,
+        error_kind: Option<String>,
+        retryable: Option<bool>,
+    }
+
+    let mut envelope =
+        error_envelope_with_kind::<()>("rejected", CoreErrorKind::ConfigCheckFailed, Some(false));
+    let old_wire = serde_json::to_value(&envelope).unwrap();
+    assert!(old_wire.get("config_check_diagnostic").is_none());
+    let old: R<'static, ()> = serde_json::from_value(old_wire.clone()).unwrap();
+    assert_eq!(old.config_check_diagnostic, None);
+    let mut explicit_null = old_wire;
+    explicit_null["config_check_diagnostic"] = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_value::<R<'static, ()>>(explicit_null)
+            .unwrap()
+            .config_check_diagnostic,
+        None
+    );
+
+    envelope.config_check_diagnostic = Some(CoreConfigCheckDiagnostic::Rule { index: 2 });
+    let wire = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(
+        wire["config_check_diagnostic"],
+        serde_json::json!({"kind":"rule","index":2})
+    );
+    let old: OldEnvelope = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(old.code, ResponseCode::OtherError);
+    assert_eq!(old.msg, "rejected");
+    assert_eq!(old.data, None);
+    assert_eq!(old.ts, TS);
+    assert_eq!(old.error_kind.as_deref(), Some("config_check_failed"));
+    assert_eq!(old.retryable, Some(false));
+    assert_eq!(
+        serde_json::from_value::<R<'static, ()>>(wire)
+            .unwrap()
+            .config_check_diagnostic,
+        envelope.config_check_diagnostic
+    );
+    let success = serde_json::to_value(ok_envelope(())).unwrap();
+    assert!(success.get("config_check_diagnostic").is_none());
+}
+
+#[test]
+fn a_future_diagnostic_tag_is_not_silently_treated_as_absence() {
+    let mut wire = serde_json::to_value(error_envelope::<()>("rejected")).unwrap();
+    wire["config_check_diagnostic"] = serde_json::json!({"kind":"future_kind"});
+    assert!(serde_json::from_value::<R<'static, ()>>(wire).is_err());
+}

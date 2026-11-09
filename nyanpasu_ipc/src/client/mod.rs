@@ -6,7 +6,7 @@ use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use crate::{
     SERVICE_PLACEHOLDER,
     api::{
-        CoreErrorKind, R, ResponseCode,
+        CoreConfigCheckDiagnostic, CoreErrorKind, R, ResponseCode,
         contract::{IpcOperation, OpResponse},
     },
 };
@@ -56,6 +56,8 @@ pub enum ClientError {
         /// covers every service too old to carry the field, so it must not be
         /// read as "do not retry"; see [`ClientError::retryable`].
         retryable: Option<bool>,
+        /// The service's typed kernel diagnostic, when available.
+        config_check_diagnostic: Option<CoreConfigCheckDiagnostic>,
     },
     #[error("IPC request `{operation}` succeeded but carried no data")]
     EmptyData { operation: &'static str },
@@ -68,6 +70,17 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// The service's typed check diagnostic; absent for old peers and transport errors.
+    pub fn config_check_diagnostic(&self) -> Option<&CoreConfigCheckDiagnostic> {
+        match self {
+            Self::Server {
+                config_check_diagnostic,
+                ..
+            } => config_check_diagnostic.as_ref(),
+            _ => None,
+        }
+    }
+
     /// The typed classification of a server-side failure, when there is one
     /// this build knows.
     ///
@@ -183,6 +196,7 @@ impl Client {
                 msg: envelope.msg.into_owned(),
                 error_kind: envelope.error_kind.map(|kind| kind.into_owned()),
                 retryable: envelope.retryable,
+                config_check_diagnostic: envelope.config_check_diagnostic,
             });
         }
         let body =
@@ -229,6 +243,7 @@ impl Client {
                 msg: envelope.msg.into_owned(),
                 error_kind: envelope.error_kind.map(|kind| kind.into_owned()),
                 retryable: envelope.retryable,
+                config_check_diagnostic: envelope.config_check_diagnostic,
             });
         }
         Ok(envelope)
@@ -239,6 +254,80 @@ impl Client {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn check_diagnostics_reach_the_client_on_both_decode_paths() {
+        use std::{borrow::Cow, path::PathBuf};
+
+        use axum::{Json, Router, routing::post};
+
+        use crate::api::{
+            RBuilder,
+            core::check::{CORE_CHECK_ENDPOINT, CoreCheckReq, CoreCheckRes},
+        };
+
+        for (status, diagnostic) in [
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(CoreConfigCheckDiagnostic::Rule { index: 7 }),
+            ),
+            (
+                StatusCode::OK,
+                Some(CoreConfigCheckDiagnostic::Rule { index: 7 }),
+            ),
+            (StatusCode::INTERNAL_SERVER_ERROR, None),
+        ] {
+            let expected = diagnostic.clone();
+            let router = Router::new().route(
+                CORE_CHECK_ENDPOINT,
+                post(move || {
+                    let diagnostic = diagnostic.clone();
+                    async move {
+                        let mut envelope: CoreCheckRes<'static> = RBuilder::other_error_with_kind(
+                            Cow::Borrowed("rejected"),
+                            Some(CoreErrorKind::ConfigCheckFailed),
+                            Some(false),
+                        );
+                        envelope.config_check_diagnostic = diagnostic;
+                        (status, Json(envelope))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let client = Client {
+                client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                base_url: Url::parse(&format!("http://{address}/")).unwrap(),
+            };
+            let error = client
+                .check_config(&CoreCheckReq {
+                    core_type: Cow::Owned(nyanpasu_utils::core::CoreType::Clash(
+                        nyanpasu_utils::core::ClashCoreType::Mihomo,
+                    )),
+                    config_file: Cow::Owned(PathBuf::from("candidate.yaml")),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.core_error_kind(),
+                Some(CoreErrorKind::ConfigCheckFailed)
+            );
+            assert_eq!(error.config_check_diagnostic(), expected.as_ref());
+            assert!(!error.retryable());
+            server.abort();
+        }
+        assert_eq!(
+            ClientError::EmptyData {
+                operation: CORE_CHECK_ENDPOINT
+            }
+            .config_check_diagnostic(),
+            None
+        );
+    }
+
     #[test]
     fn a_known_kind_is_typed() {
         let error = ClientError::Server {
@@ -246,6 +335,7 @@ mod tests {
             code: ResponseCode::OtherError,
             msg: "boom".into(),
             retryable: None,
+            config_check_diagnostic: None,
             error_kind: Some("revision_conflict".into()),
         };
         assert_eq!(
@@ -263,6 +353,7 @@ mod tests {
             code: ResponseCode::OtherError,
             msg: "boom".into(),
             retryable,
+            config_check_diagnostic: None,
             error_kind: Some("backend_unavailable".into()),
         };
         assert!(server(None).retryable());
@@ -276,6 +367,7 @@ mod tests {
             code: ResponseCode::OtherError,
             msg: "boom".into(),
             retryable: None,
+            config_check_diagnostic: None,
             error_kind: Some("a_future_kind".into()),
         };
         assert!(error.core_error_kind().is_none());
