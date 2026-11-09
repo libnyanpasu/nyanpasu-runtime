@@ -34,6 +34,13 @@ pub async fn run(
     let runtime_dir =
         camino::Utf8PathBuf::from_path_buf(crate::utils::dirs::service_core_runtime_dir())
             .map_err(|path| anyhow::anyhow!("core runtime dir is not UTF-8: {}", path.display()))?;
+    #[cfg(unix)]
+    let socket_owner_uid = crate::utils::native_store_owner::FsOwnerBindingStore::new(
+        &runtime.service_config_dir,
+        &runtime.nyanpasu_data_dir,
+    )
+    .load()?
+    .map(|owner| owner.uid);
     let native_store = Arc::new(native_store_for_host(&runtime)?);
     let (controller_dir, access): (_, Arc<dyn nyanpasu_core_manager::ControllerAccess>) =
         controller_access_for_host(sids)?;
@@ -113,7 +120,10 @@ pub async fn run(
         Some(async move {
             shutdown_token.cancelled().await;
         }),
+        #[cfg(windows)]
         sids,
+        #[cfg(not(windows))]
+        socket_owner_uid,
     );
     tokio::pin!(server);
     enum ServerExit<E> {
