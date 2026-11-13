@@ -397,11 +397,11 @@ fn validate(request: &Request) -> Result<(), String> {
 }
 
 fn verify_ports(config: &str, mode: Mode, port: u16) -> Result<(), String> {
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(config).map_err(|e| e.to_string())?;
+    let value: yaml_serde::Value = yaml_serde::from_str(config).map_err(|e| e.to_string())?;
     if value
         .get("tun")
         .and_then(|tun| tun.get("enable"))
-        .and_then(serde_yaml_ng::Value::as_bool)
+        .and_then(yaml_serde::Value::as_bool)
         == Some(true)
     {
         return Err("disable TUN before enabling transparent capture".into());
@@ -413,8 +413,8 @@ fn verify_ports(config: &str, mode: Mode, port: u16) -> Result<(), String> {
     };
     let actual = value
         .as_mapping()
-        .and_then(|map| map.get(serde_yaml_ng::Value::String(key.into())))
-        .and_then(serde_yaml_ng::Value::as_u64);
+        .and_then(|map| map.get(yaml_serde::Value::String(key.into())))
+        .and_then(yaml_serde::Value::as_u64);
     if actual != Some(port as u64) {
         return Err(format!(
             "effective Mihomo {key} does not match requested port {port}"
@@ -427,8 +427,7 @@ fn verify_ports(config: &str, mode: Mode, port: u16) -> Result<(), String> {
         "redir-port",
         "tproxy-port",
     ] {
-        if other != key
-            && value.get(other).and_then(serde_yaml_ng::Value::as_u64) == Some(port as u64)
+        if other != key && value.get(other).and_then(yaml_serde::Value::as_u64) == Some(port as u64)
         {
             return Err(format!(
                 "effective {other} conflicts with {key} on port {port}"
@@ -437,10 +436,10 @@ fn verify_ports(config: &str, mode: Mode, port: u16) -> Result<(), String> {
     }
     if value
         .get("listeners")
-        .and_then(serde_yaml_ng::Value::as_sequence)
+        .and_then(yaml_serde::Value::as_sequence)
         .is_some_and(|listeners| {
             listeners.iter().any(|listener| {
-                listener.get("port").and_then(serde_yaml_ng::Value::as_u64) == Some(port as u64)
+                listener.get("port").and_then(yaml_serde::Value::as_u64) == Some(port as u64)
             })
         })
     {
@@ -450,8 +449,8 @@ fn verify_ports(config: &str, mode: Mode, port: u16) -> Result<(), String> {
     }
     let mark = value
         .as_mapping()
-        .and_then(|map| map.get(serde_yaml_ng::Value::String("routing-mark".into())))
-        .and_then(serde_yaml_ng::Value::as_u64);
+        .and_then(|map| map.get(yaml_serde::Value::String("routing-mark".into())))
+        .and_then(yaml_serde::Value::as_u64);
     if mark != Some(ROUTING_MARK as u64) {
         return Err("effective Mihomo routing-mark must be 0x20000".into());
     }
