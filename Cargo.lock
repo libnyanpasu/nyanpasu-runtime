@@ -2196,10 +2196,10 @@ version = "1.0.4"
 dependencies = [
  "backon",
  "camino",
- "chrono",
  "clash-api",
  "enumset",
  "futures-util",
+ "jiff",
  "libc",
  "nyanpasu-core-manager",
  "nyanpasu-core-metadata",
