@@ -2297,9 +2297,9 @@ dependencies = [
 name = "nyanpasu-logging"
 version = "0.1.5"
 dependencies = [
- "chrono",
  "file-id",
  "gxhash",
+ "jiff",
  "lasso",
  "ractor",
  "serde",
